@@ -6,6 +6,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "llama.h"
+
 #include "model_cmd.h"
 #include "server.h"
 #include "server_config.h"
@@ -14,6 +16,17 @@
 #include "doctor_cmd.h"
 #include "setup_cmd.h"
 #include "use_cmd.h"
+#include "chat_cmd.h"
+#include "plan_cmd.h"
+#include "observe_cmd.h"
+#include "advise_cmd.h"
+#include "adaptive_cmd.h"
+#include "ui.h"
+#include "dashboard_cmd.h"
+#include "models_cmd.h"
+#include "orchestrate_cmd.h"
+#include "apply_cmd.h"
+#include "runtime_cmd.h"
 #include "product_cli.h"
 
 using json = nlohmann::json;
@@ -33,8 +46,30 @@ using json = nlohmann::json;
 
 static void	print_usage(FILE *out)
 {
-	fprintf(out, "membrane %s -- MEMBRANE control CLI\n\n", MEMBRANE_VERSION);
-	fprintf(out, "Usage:\n");
+	fprintf(out, "membrane %s -- hardware-aware memory intelligence and "
+		"control for local LLM inference\n\n", MEMBRANE_VERSION);
+	fprintf(out, "Start here:\n");
+	fprintf(out, "  membrane                           a status screen with "
+		"the next step\n");
+	fprintf(out, "  membrane models                    what is installed "
+		"(also: models available, models recommend)\n");
+	fprintf(out, "  membrane use [MODEL]               install/select a "
+		"model (a numbered list on a terminal)\n");
+	fprintf(out, "  membrane chat                      talk to it\n");
+	fprintf(out, "  membrane doctor                    check that "
+		"everything works\n\n");
+	fprintf(out, "Understand memory (read-only):  plan -> observe -> "
+		"advise\n");
+	fprintf(out, "Change things (explicit):       apply (dry run by "
+		"default)   adaptive (opt-in)\n");
+	fprintf(out, "Pick a runtime:                 run MODEL   runtime "
+		"list|inspect\n");
+	fprintf(out, "Serve to apps:                  serve | service ... "
+		"(OpenAI-compatible API, loopback only)\n\n");
+	fprintf(out, "Human output is the default; add --json for machines and "
+		"--verbose for every detail. Docs: docs/quickstart.md, "
+		"docs/cli-reference.md\n\n");
+	fprintf(out, "All commands:\n");
 	fprintf(out, "  membrane model add NAME PATH      register a local "
 		"GGUF model under NAME\n");
 	fprintf(out, "  membrane model remove NAME        unregister NAME\n");
@@ -55,6 +90,39 @@ static void	print_usage(FILE *out)
 	fprintf(out, "  membrane use MODEL                 select/activate "
 		"MODEL -- installs it first (with consent) if not already "
 		"installed\n");
+	fprintf(out, "  membrane plan MODEL                READ-ONLY: show "
+		"the hardware-aware plan MEMBRANE would use for MODEL (see "
+		"plan options)\n");
+	fprintf(out, "  membrane runtime list              READ-ONLY: list "
+		"the inference runtimes this build can describe\n");
+	fprintf(out, "  membrane runtime inspect ID        READ-ONLY: show "
+		"one runtime's identity and capability matrix\n");
+	fprintf(out, "  membrane runtime models ID         READ-ONLY: list "
+		"an external runtime's own models (e.g. ollama)\n");
+	fprintf(out, "  membrane runtime model inspect ID MODEL\n"
+		"                                     READ-ONLY: show one "
+		"external-runtime model's metadata\n");
+	fprintf(out, "  membrane observe                   READ-ONLY: "
+		"point-in-time facts (RAM, GPU, model, context, KV, service), "
+		"each labeled measured/estimated/...\n");
+	fprintf(out, "  membrane advise                    READ-ONLY: "
+		"explainable memory-pressure findings + capability-aware "
+		"recommendations -- never applies anything (see advise "
+		"options)\n");
+	fprintf(out, "  membrane apply                     MUTATING, dry-run by "
+		"default: shows what advice could be applied; --yes applies it "
+		"(see apply options)\n");
+	fprintf(out, "  membrane adaptive status|enable|disable\n"
+		"                                     OPT-IN bounded runtime "
+		"adaptation (off by default; see adaptive options)\n");
+	fprintf(out, "  membrane models [available|recommend]\n"
+		"                                     installed models; the "
+		"catalog; what suits this computer\n");
+	fprintf(out, "  membrane run MODEL                 choose the runtime that "
+		"fits MODEL on this machine, say why, then use it (see run options)\n");
+	fprintf(out, "  membrane chat [MODEL]              interactive "
+		"terminal chat with the local server (see membrane chat "
+		"--help)\n");
 	fprintf(out, "  membrane serve                    start a local "
 		"OpenAI-compatible HTTP server (foreground)\n");
 	fprintf(out, "  membrane status                    check a running "
@@ -107,6 +175,58 @@ static void	print_usage(FILE *out)
 	fprintf(out, "  --yes / -y                           allow an "
 		"unattended download with no interactive prompt\n");
 	fprintf(out, "\n");
+	fprintf(out, "plan options (see docs/planner-v2-foundation.md):\n");
+	fprintf(out, "  --ctx auto|N                        context target "
+		"(default: auto)\n");
+	fprintf(out, "  --kv native|q8|q5|adaptive          KV precision "
+		"target (default: adaptive if a GPU is present, else native)\n");
+	fprintf(out, "  --gpu-layers all|auto|N             GPU layer target "
+		"(default: auto)\n");
+	fprintf(out, "  --quant QUANT / --variant QUANT     variant to plan "
+		"for (catalog-only models; ignored for an installed model)\n");
+	fprintf(out, "  --runtime ID                        READ-ONLY: assess "
+		"which planned/requested settings runtime ID\n"
+		"                                     can control (membrane-native, "
+		"ollama); applies nothing\n");
+	fprintf(out, "\n");
+	fprintf(out, "apply options (see docs/active-control.md):\n");
+	fprintf(out, "  (default)                           DRY RUN -- nothing "
+		"is changed\n");
+	fprintf(out, "  --yes / -y                          actually apply "
+		"(required when not on a TTY)\n");
+	fprintf(out, "  --runtime ID                        membrane-native "
+		"(default) or ollama\n");
+	fprintf(out, "  --context N|auto, --kv native|q8|q5|auto, --kv-placement "
+		"default|cpu|gpu|auto, --gpu-layers all|auto|N\n");
+	fprintf(out, "                                      explicit setting "
+		"requests, validated by Planner v2 first\n");
+	fprintf(out, "  --unload M, --activate M, --pin M, --unpin M, --reload "
+		"[--model M]\n");
+	fprintf(out, "                                      explicit model "
+		"residency actions\n");
+	fprintf(out, "\n");
+	fprintf(out, "run options (see docs/orchestration.md):\n");
+	fprintf(out, "  --runtime auto|membrane-native|ollama|vllm   default auto: "
+		"consider every runtime\n");
+	fprintf(out, "  --intent general|interactive|memory_saving|long_context  "
+		"default general\n");
+	fprintf(out, "  --explain                           choose and explain; "
+		"change nothing\n");
+	fprintf(out, "\n");
+	fprintf(out, "adaptive options (see docs/adaptive-runtime.md):\n");
+	fprintf(out, "  status                              live controller "
+		"state (or the saved policy if the service is stopped)\n");
+	fprintf(out, "  enable [--mode observe|recommend|apply]  default "
+		"recommend (never changes anything); apply needs --yes or a TTY "
+		"confirmation\n");
+	fprintf(out, "         [--runtime ID] [--allow context,kv_precision,"
+		"kv_placement,gpu_layers,unload] [--interval S] [--cooldown S]\n");
+	fprintf(out, "  disable                             turn it off\n");
+	fprintf(out, "\n");
+	fprintf(out, "advise options (see docs/memory-intelligence.md):\n");
+	fprintf(out, "  --runtime ID                        runtime to assess "
+		"(membrane-native, ollama) -- default membrane-native\n");
+	fprintf(out, "\n");
 	fprintf(out, "serve options:\n");
 	fprintf(out, "  --port N                           listen port "
 		"(default 8642)\n");
@@ -125,7 +245,9 @@ static void	print_usage(FILE *out)
 	fprintf(out, "\n");
 	fprintf(out, "Options:\n");
 	fprintf(out, "  --json                             machine-readable "
-		"JSON output\n");
+		"JSON output (never colored)\n");
+	fprintf(out, "  --no-color                         plain output (also "
+		"honored: NO_COLOR; color is only used on a terminal)\n");
 	fprintf(out, "  --help                             show this help\n");
 	fprintf(out, "  --version                          show version\n");
 	fprintf(out, "\n");
@@ -144,6 +266,39 @@ int	main(int argc, char **argv)
 	bool						want_json = false;
 	int							i;
 
+	/* Special-cased BEFORE the generic --help/--json scan below so
+	 * `membrane chat --help` shows chat's own per-command help text
+	 * (Section 20 of the task) instead of this file's top-level usage --
+	 * every other subcommand's `--help` is still intercepted globally by
+	 * that scan, unchanged, pre-existing behavior (deliberately out of
+	 * this prompt's narrow scope). `membrane chat` is also the one
+	 * subcommand that reads raw stdin itself (an interactive REPL), so
+	 * it parses its own remaining argv directly rather than going
+	 * through the shared want_json/args plumbing below, which no other
+	 * subcommand needs either. */
+	if (argc >= 2 && std::string(argv[1]) == "chat")
+	{
+		std::vector<std::string>	chat_args;
+
+		for (int k = 2; k < argc; ++k)
+			chat_args.push_back(argv[k]);
+		return (membrane_chat_cmd_dispatch(chat_args, false));
+	}
+	bool						no_color = false;
+
+	/* Backend/device enumeration chatter ("ggml_vulkan: Found 2 Vulkan
+	 * devices", "register_backend: ...") is engine logging, not product
+	 * output: silence it for every command except `serve` (where it is
+	 * useful in a log). MEMBRANE_LOG=1 turns it back on anywhere. */
+	if (!(argc >= 2 && std::string(argv[1]) == "serve")
+		&& getenv("MEMBRANE_LOG") == NULL)
+		llama_log_set([](enum ggml_log_level, const char *, void *) {},
+			NULL);
+
+	for (int k = 1; k < argc; ++k)
+		if (std::string(argv[k]) == "--no-color")
+			no_color = true;
+	membrane_ui_configure(no_color);
 	i = 1;
 	while (i < argc)
 	{
@@ -151,6 +306,8 @@ int	main(int argc, char **argv)
 
 		if (a == "--json")
 			want_json = true;
+		else if (a == "--no-color")
+			;			/* consumed above, before any output is styled */
 		else if (a == "--help" || a == "-h")
 			return (print_usage(stdout), MEMBRANE_EXIT_SUCCESS);
 		else if (a == "--version")
@@ -161,10 +318,9 @@ int	main(int argc, char **argv)
 		i++;
 	}
 	if (args.empty())
-	{
-		print_usage(stderr);
-		return (MEMBRANE_EXIT_CLI_ERROR);
-	}
+		return (membrane_dashboard_cmd_dispatch(want_json));
+	if (args[0] == "help")
+		return (print_usage(stdout), MEMBRANE_EXIT_SUCCESS);
 	if (args[0] == "model")
 	{
 		std::vector<std::string>	model_args(args.begin() + 1,
@@ -177,6 +333,57 @@ int	main(int argc, char **argv)
 		std::vector<std::string>	use_args(args.begin() + 1, args.end());
 
 		return (membrane_use_cmd_dispatch(use_args, want_json));
+	}
+	if (args[0] == "plan")
+	{
+		std::vector<std::string>	plan_args(args.begin() + 1, args.end());
+
+		return (membrane_plan_cmd_dispatch(plan_args, want_json));
+	}
+	if (args[0] == "runtime")
+	{
+		std::vector<std::string>	runtime_args(args.begin() + 1,
+				args.end());
+
+		return (membrane_runtime_cmd_dispatch(runtime_args, want_json));
+	}
+	if (args[0] == "observe")
+	{
+		std::vector<std::string>	observe_args(args.begin() + 1,
+				args.end());
+
+		return (membrane_observe_cmd_dispatch(observe_args, want_json));
+	}
+	if (args[0] == "advise")
+	{
+		std::vector<std::string>	advise_args(args.begin() + 1,
+				args.end());
+
+		return (membrane_advise_cmd_dispatch(advise_args, want_json));
+	}
+	if (args[0] == "models")
+	{
+		std::vector<std::string>	models_args(args.begin() + 1, args.end());
+
+		return (membrane_models_cmd_dispatch(models_args, want_json));
+	}
+	if (args[0] == "run")
+	{
+		std::vector<std::string>	run_args(args.begin() + 1, args.end());
+
+		return (membrane_run_cmd_dispatch(run_args, want_json));
+	}
+	if (args[0] == "adaptive")
+	{
+		std::vector<std::string>	adaptive_args(args.begin() + 1, args.end());
+
+		return (membrane_adaptive_cmd_dispatch(adaptive_args, want_json));
+	}
+	if (args[0] == "apply")
+	{
+		std::vector<std::string>	apply_args(args.begin() + 1, args.end());
+
+		return (membrane_apply_cmd_dispatch(apply_args, want_json));
 	}
 	if (args[0] == "serve")
 	{

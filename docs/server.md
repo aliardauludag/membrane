@@ -33,6 +33,12 @@ membrane model add qwen /path/to/model.gguf
 membrane serve
 ```
 
+**Post-v1 product-polish, prompt 3:** for a human at a terminal (as
+opposed to an app/SDK integration), `membrane chat` is the normal way to
+talk to this server — an interactive REPL client of the exact same API
+this document describes, never a second inference path. See
+`docs/chat.md`.
+
 Then point any OpenAI-compatible client at `http://127.0.0.1:8642/v1`.
 
 ## Security scope
@@ -148,17 +154,40 @@ Response (OpenAI shape plus one additive `membrane` object):
 }
 ```
 
-`finish_reason` is `"length"` when generation hit the requested token
-limit, `"stop"` otherwise (an inferred distinction — there is no
-explicit "why did generation stop" signal from the decode loop beyond
-token count vs. limit).
+`finish_reason` is `"stop"` when a user-supplied `stop` sequence matched
+or the model itself emitted a real end-of-generation token
+(`llama_vocab_is_eog()`, decode_loop.cpp — a real, tracked signal, not
+inferred from token count), and `"length"` only when neither happened
+before the requested token limit was reached. Streaming and
+non-streaming share the exact same decision
+(`membrane_chat_finish_reason()`, `chat_finish_reason.h`).
 
 ### Chat templates
 
 The model's own embedded chat template (`llama_chat_apply_template()`,
-real llama.cpp API, GGUF metadata) is always used — never a naive manual
-`"User: ... Assistant: ..."` join. A model with no usable template
-returns `500 CHAT_TEMPLATE_UNAVAILABLE`; there is no fallback formatting.
+real llama.cpp API, GGUF metadata) is always used exactly once per
+request, with `add_ass=true` so the rendered prompt ends in the real
+assistant-generation suffix — never a naive manual
+`"User: ... Assistant: ..."` join, never applied twice. A model with no
+usable template returns `500 CHAT_TEMPLATE_UNAVAILABLE`; there is no
+fallback formatting.
+
+**Tokenization and generated-content guarantees** (a real, fixed
+v1.0.0 bug — see `results/chat-template-and-eos/validation.json`): the
+rendered template's own literal control-token text
+(`<|im_start|>`, `<|im_end|>`, and equivalents for other chat formats)
+is tokenized with `llama_tokenize()`'s own `parse_special=true`, so the
+model sees its real, single special-token ids exactly as it was
+fine-tuned to — never re-split into ordinary sub-word text. A prior bug
+here (`parse_special` hardcoded `false`) corrupted every chat-templated
+prompt's own turn structure, which is what caused the model to echo the
+prompt and never reliably terminate. Generated tokens are converted back
+to API-facing text with `llama_token_to_piece()`'s own `special=false`,
+so a chat-control token's literal text is never exposed in assistant
+`content` (llama.h's own token-attribute classification, never a
+hardcoded string cleanup pass) — the model's real generated output,
+starting exactly after the prompt's own tokens, is all a client ever
+sees.
 
 ### Context, GPU layers, and KV precision — fully automatic
 
@@ -287,6 +316,20 @@ failure-recovery guarantees (see below) for free. Never evicts a model
 out from under an in-progress generation, and never evicts a pinned one
 — see "Multi-model residency" below for the real selection/eviction
 policy this endpoint now goes through.
+
+### `POST /membrane/v1/models/unload` (Milestone J, internal/admin only)
+
+Body `{"model": NAME}`. Closes ONE resident model through the same slot
+machinery model switching uses. Fail-closed: a pinned model is `409
+MODEL_PINNED`, a model with a generation in flight is `409 MODEL_BUSY`, a
+model that is not resident is `409 MODEL_NOT_RESIDENT` — it never waits and
+never evicts anything else. Loopback admin namespace like activate/pin; used
+by `membrane apply` ([active-control.md](active-control.md)).
+
+### `GET /membrane/v1/adaptive` (Milestone K, internal/admin only)
+
+The adaptive controller's live state (read-only), used by `membrane
+adaptive status` ([adaptive-runtime.md](adaptive-runtime.md)).
 
 ### `POST /membrane/v1/models/pin` / `.../unpin` (PR E2, internal/admin only)
 
@@ -471,7 +514,9 @@ SSE `data: {"error": {...}}` event — see "Streaming" above.
 | 400 | `CTX_TOO_SMALL_FOR_PROMPT` | the prompt is far larger (raw byte length, a cheap pre-tokenization check) than the model's own real maximum context — rejected before an expensive real tokenization attempt (PR D8, Section 15: a real, disclosed PR D7 finding that an extremely oversized prompt could make the server unresponsive for minutes on a memory-constrained host, root-caused and fixed this phase) |
 | 503 | `MODEL_SWITCH_BUSY` | a switch to a different model was requested, but a request against the currently-loaded model is still decoding and didn't drain within a bounded (~5s) wait (PR E1) — the current model is left fully intact and still serving; retry shortly |
 | 503 | `RESIDENCY_EXHAUSTED` | multi-model residency (PR E2): every resident slot is either pinned or actively generating, so no slot is available to load a not-yet-resident model — see "Multi-model residency" above |
-| 409 | `MODEL_NOT_RESIDENT` | multi-model residency (PR E2): `POST /membrane/v1/models/pin`/`.../unpin` was called for a model that is not currently resident — pin/unpin only applies to an already-loaded model |
+| 409 | `MODEL_NOT_RESIDENT` | multi-model residency (PR E2): `POST /membrane/v1/models/pin`/`.../unpin` (and, Milestone J, `.../unload`) was called for a model that is not currently resident — these only apply to an already-loaded model |
+| 409 | `MODEL_PINNED` | Milestone J: `POST /membrane/v1/models/unload` named a pinned model — never unloaded silently; unpin it first |
+| 409 | `MODEL_BUSY` | Milestone J: `POST /membrane/v1/models/unload` named a model with a generation in flight — refused, never waited on; retry once it is idle |
 
 ## Client integration (PR B4)
 

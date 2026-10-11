@@ -398,6 +398,28 @@ jobs:
       - name: Verify model-variant-selection evidence and docs
         run: python3 scripts/verify-model-variant-selection.py
 
+  # Milestone G3: validates results/planner-v2-evidence/validation.json's
+  # schema, classification-vs-outcome consistency (a TRUE_FEASIBLE/
+  # TRUE_REJECT/FALSE_REJECT/etc. label must agree with its own recorded
+  # plan_feasible/real_load_generate_succeeded booleans), and that the
+  # performance-floor threshold was declared before the results it
+  # classifies. Same reasoning as every other *-check job above:
+  # python3 + checkout only, no GPU, no model download, no C/C++ build
+  # -- this validates the already-committed, already-curated evidence
+  # file; it never re-runs any real Planner v2 workload itself (that
+  # happened once, manually, on a real host -- see
+  # docs/planner-v2-evidence.md).
+  planner-v2-evidence-check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify Planner v2 evidence artifact
+        run: python3 scripts/verify-planner-v2-evidence.py
+
   # Phase 21: exercises the fallback controller's own test suite
   # (llama-free, ASan/UBSan-friendly) plus test_joint_planner without
   # paying for a full llama.cpp/ggml build -- both are registered
@@ -711,7 +733,7 @@ jobs:
         run: |
           cmake --build build-cpu-install -j2 --target membrane-run \
             membrane test_runtime_session test_registry_core test_server \
-            test_setup_cmd
+            test_setup_cmd test_observe_cmd
 
       # Mega Phase A, PR A1: this is the ONLY CI coverage test_runtime_
       # session gets (same pre-existing gap fallback-controller-tests
@@ -741,7 +763,7 @@ jobs:
       - name: Test runtime-session core, model registry, HTTP server, and setup
         run: |
           ctest --test-dir build-cpu-install --output-on-failure \
-            -R '^test_runtime_session$|^test_registry_core$|^test_server$|^test_setup_cmd$'
+            -R '^test_runtime_session$|^test_registry_core$|^test_server$|^test_setup_cmd$|^test_observe_cmd$'
 
       - name: CPU install to temp prefix
         run: |
@@ -789,6 +811,16 @@ jobs:
             exit 1
           fi
           rm -f /tmp/ci-membrane-models.json
+          # Milestone I1: `membrane observe` from the installed tree, in an
+          # isolated env -- read-only (no registry/config file created), a
+          # successful partial snapshot, RAM measured, unknowns null.
+          MEMBRANE_MODELS_PATH=/tmp/ci-observe-models.json \
+          MEMBRANE_SERVER_CONFIG_PATH=/tmp/ci-observe-server.json \
+            /tmp/membrane-install-cpu/bin/membrane observe --json \
+            > /tmp/ci-observe.json
+          python3 -c "import json; d = json.load(open('/tmp/ci-observe.json')); assert d['status'] == 'partial', d['status']; assert d['host_memory']['total_bytes']['provenance'] == 'measured'; assert d['kv']['measured_bytes']['value'] is None"
+          test ! -e /tmp/ci-observe-models.json
+          test ! -e /tmp/ci-observe-server.json
 
       # Mega Phase A, PR A3: the installed `membrane serve` binary really
       # starts, listens, answers /health, and stops cleanly on SIGTERM --
@@ -1059,21 +1091,26 @@ jobs:
           path: dist/
           if-no-files-found: error
 
-  # Mega Phase D, PR D8: validates v0.8.0 stable-release readiness (live
-  # tree state: MEMBRANE_VERSION, CITATION.cff, release notes, the
-  # support/model-compatibility matrices' own evidence-state vocabulary,
-  # official package policy, no CUDA/Windows-GPU/Open-WebUI-validated/
-  # "complete OpenAI API"/production-ready overclaim, README release
-  # status, D1-D7's own evidence carrying real squash SHAs, the real
-  # long-context fix, an honest reproducibility disclosure, and that
-  # historical v0.3.0/v0.4.0 release docs/evidence remain untouched) --
-  # python3 + checkout only, no GPU, no model download, no C/C++ build,
-  # no Docker. Same standalone-script/own-CI-job pattern as
-  # release-v040-check before it (retired this same PR, see that job's
-  # own removal comment for the precedent) -- this job is itself
-  # expected to need the same retirement once a future release
-  # supersedes v0.8.0.
-  release-v080-check:
+  # Mega Phase E, PR E6: release-v080-check (Mega Phase D, PR D8) is
+  # RETIRED from CI as of this PR, exactly as its own comment predicted
+  # ("expected to need the same retirement once a future release
+  # supersedes v0.8.0") and the same precedent as release-v040-check's/
+  # release-v030-check's own removal before it. scripts/verify-release-
+  # v0.8.0.py's assertions ("MEMBRANE_VERSION == 0.8.0", "CITATION.cff
+  # version == 0.8.0", README's release-status line naming v0.8.0 as
+  # latest stable) become permanently false by design once the version
+  # legitimately moves on to v1.0.0 -- the script FILE is untouched
+  # (still documents exactly what PR D8 checked at the time), only this
+  # CI wiring is removed. scripts/verify-release-supply-chain.py's/
+  # verify-api-contract.py's/etc. own live-MEMBRANE_VERSION checks
+  # (updated to 1.0.0 this PR) remain this job's successor for ongoing
+  # live-version tracking; release-v100-check (below, this PR's own new
+  # validator) is release-v080-check's real successor for release-
+  # specific readiness. (v1.1.0 release prep: release-v100-check is retired
+  # in turn -- its "MEMBRANE_VERSION == 1.0.0" assertions became false by
+  # design -- and release-v110-check, scripts/verify-release-v1.1.0.py, is
+  # its successor; the v1.0.0 script stays in the repository as history.)
+  release-v110-check:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1081,8 +1118,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Verify v0.8.0 stable-release readiness
-        run: python3 scripts/verify-release-v0.8.0.py
+          fetch-depth: 0
+      - name: Verify v1.1.0 release readiness
+        run: python3 scripts/verify-release-v1.1.0.py
 
   # Mega Phase D, PR D3: validates the committed real-CUDA-hardware
   # evidence (results/cuda-backend/validation.json) and a handful of
@@ -1224,20 +1262,18 @@ jobs:
             smollm2:135m --quant q4_k_m --json | tee /tmp/install-result.json
           echo "MODEL_PATH=$(python3 -c 'import json;print(json.load(open("/tmp/install-result.json"))["path"])')" >> "$GITHUB_ENV"
 
-      # A real, genuine finding from this job's own first real run:
-      # --ctx auto correctly refuses to proceed (PLANNER_REJECTED_ALL)
-      # on this runner -- host_memory_guard's host-RAM read is Linux-
-      # only (/proc/meminfo), so --ctx auto has no host-memory fact to
-      # size against on macOS yet (a real, disclosed, pre-existing gap,
-      # out of this PR's own scope -- see docs/macos-metal.md's known
-      # limitations). An explicit --ctx N (still combined with --auto
-      # for GPU-layers/KV auto-selection) is the CLI's own documented
-      # example 5 for exactly this situation and is what actually
-      # exercises real Metal generation here.
-      - name: Real generation on Metal (--gpu-layers auto)
+      # Mega Phase E, PR E5, Section 38: membrane_read_host_meminfo()
+      # (tools/membrane-run/runtime_session.cpp) now has a real macOS
+      # branch (sysctlbyname("hw.memsize")/host_statistics64()) --
+      # --ctx auto's own real host-memory sizing now has a genuine
+      # fact to size against on this runner (previously a real,
+      # disclosed gap: PLANNER_REJECTED_ALL, host-RAM read was Linux-
+      # only). Real --ctx auto (not an explicit --ctx N workaround)
+      # exercises that new code path directly on real hardware.
+      - name: Real generation on Metal (--ctx auto, --gpu-layers auto)
         run: |
           ./build-metal-smoke/tools/membrane-run/membrane-run \
-            --model "$MODEL_PATH" --prompt "Hello" --ctx 2048 --auto \
+            --model "$MODEL_PATH" --prompt "Hello" --ctx auto \
             --gpu-layers auto --json | tee /tmp/generation-result.json
           python3 -c "import json,sys; d=json.load(open('/tmp/generation-result.json')); sys.exit(0 if d.get('ok') is True else 1)"
 
@@ -1376,10 +1412,16 @@ jobs:
             smollm2:135m --quant q4_k_m --json | tee install-result.json
           echo "MODEL_PATH=$(python3 -c 'import json;print(json.load(open("install-result.json"))["path"])')" >> "$GITHUB_ENV"
 
-      - name: Real CPU generation
+      # Mega Phase E, PR E5, Section 37: membrane_read_host_meminfo()
+      # (tools/membrane-run/runtime_session.cpp) now has a real Windows
+      # branch (GlobalMemoryStatusEx() -- the same, already-vendored
+      # pattern ggml-cpu.cpp's own CPU-device memory query already
+      # uses) -- real --ctx auto (not an explicit --ctx N workaround)
+      # exercises that new code path directly on real hardware.
+      - name: Real CPU generation (--ctx auto)
         run: |
           ./install-windows-smoke/bin/membrane-run.exe \
-            --model "$MODEL_PATH" --prompt "Hello" --ctx 2048 --auto \
+            --model "$MODEL_PATH" --prompt "Hello" --ctx auto \
             --json | tee generation-result.json
           python3 -c "import json,sys; d=json.load(open('generation-result.json')); sys.exit(0 if d.get('ok') is True else 1)"
 

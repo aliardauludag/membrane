@@ -1,9 +1,15 @@
 # MEMBRANE
 
-MEMBRANE automatically chooses, fits, installs, runs, and serves local
-AI models on your hardware — install it, tell it which model you want,
-and talk to it over a real OpenAI-compatible API. No manual GPU-layer
-math, no llama.cpp flags to learn first.
+**Hardware-aware memory intelligence and control for local LLM inference.**
+
+MEMBRANE picks a model that fits your machine, shows how memory is being
+used, explains what to do about it, and -- only when you ask -- changes it.
+It serves the model over a local OpenAI-compatible API and can choose among
+local runtimes (its own llama.cpp-based one, Ollama, vLLM). No manual
+GPU-layer math, no llama.cpp flags to learn first.
+
+It is **not** an inference engine (llama.cpp does that), not a model (it
+cannot make one smarter), not a web UI, and not a complete OpenAI API.
 
 [![CI](https://github.com/kadireren7/membrane/actions/workflows/ci.yml/badge.svg)](https://github.com/kadireren7/membrane/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/kadireren7/membrane/actions/workflows/codeql.yml/badge.svg)](https://github.com/kadireren7/membrane/actions/workflows/codeql.yml)
@@ -13,56 +19,152 @@ math, no llama.cpp flags to learn first.
 
 ## Install
 
-Easiest path on Ubuntu/Debian/Pop!_OS: download the latest `.deb` from
-[the Releases page](https://github.com/kadireren7/membrane/releases)
-and `sudo apt install ./membrane_<version>_amd64.deb` — no manual
-CMake flags. That one package is Vulkan-enabled but runs correctly
-CPU-only (GPU offload stays opt-in); a CPU-only
-`membrane-cpu_<version>_amd64.deb` also exists as a CI-validation/
-build-your-own artifact, not a release asset. Building from source, or
-on Windows/macOS (real per-PR CI validation, no official package yet):
+Ubuntu/Debian/Pop!_OS: download the latest `.deb` from
+[the Releases page](https://github.com/kadireren7/membrane/releases) and
+`sudo apt install ./membrane_<version>_amd64.deb` -- no CMake flags. That one
+package is Vulkan-enabled but runs correctly CPU-only (GPU offload stays
+opt-in); a CPU-only `membrane-cpu_<version>_amd64.deb` exists as a
+CI-validation/build-your-own artifact. Building from source, or on
+Windows/macOS (real per-PR CI validation, no official package yet):
 [`docs/install.md`](docs/install.md), [`docs/support-matrix.md`](docs/support-matrix.md).
+Not sure which `membrane` you are running? `membrane doctor` says.
 
-## Say which model you want
+## Your first five minutes
 
 ```bash
-membrane use qwen2.5:7b
+membrane                    # a status screen, and the next step
+membrane models recommend   # what suits THIS computer (measured RAM + catalog)
+membrane use                # pick a model from a list (a partial name works too)
+membrane chat               # talk to it
 ```
 
-If `qwen2.5:7b` isn't installed yet, this previews the download (size,
-hardware fit, recommended variant), asks to confirm, installs it, and
-selects it — activating it live if `membrane serve`/the background
-service is already running. Already installed? Same command just
-selects/activates it, no restart needed. `membrane setup` runs the
-same flow for a guided first-run (register a local `.gguf`, or a
-catalog name, and stand up the background service in one pass). See
-[`docs/model-lifecycle.md`](docs/model-lifecycle.md).
+```
+MEMBRANE
+
+  Model     Qwen2.5-1.5B-Instruct
+  Runtime   Native
+  GPU       NVIDIA GeForce GTX 1650 (Vulkan)
+  Memory    Healthy
+  Server    Running  http://127.0.0.1:8642
+  Adaptive  Off
+
+Next:
+  membrane chat
+  membrane models
+```
+
+`membrane use` previews the download (size, expected fit), asks before
+downloading, verifies the checksum, installs, selects, and -- if the server is
+already running -- switches live. A name you typed loosely (`qwen`) is shown
+back to you and confirmed; MEMBRANE never acts on a guess without asking.
+`membrane setup` runs the same flow as a guided first run (including the
+background service), and `membrane doctor` checks installation, hardware,
+models, service and API in one pass and names the next step. Step by step:
+[`docs/quickstart.md`](docs/quickstart.md); every command:
+[`docs/cli-reference.md`](docs/cli-reference.md).
+
+Human output is the default; add `--json` for machines (never colored) and
+`--verbose` for every detail. Color appears only on a terminal and honors
+`NO_COLOR` / `--no-color`.
+
+## See what memory is doing, and act on it -- only when you say so
+
+```
+plan  ->  observe  ->  advise  ->  apply  ->  adapt
+read      read         read        MUTATES    opt-in, bounded
+```
+
+```bash
+membrane plan qwen2.5-1.5b-instruct   # will it fit? what will MEMBRANE do, and why?
+membrane observe                      # facts right now, each labeled where it came from
+membrane advise                       # what they mean; the one thing to do
+membrane apply                        # DRY RUN: which advice could be applied
+membrane apply --context 4096 --yes   # apply an explicit setting (checked by Planner v2 first)
+membrane adaptive enable              # recommend-only; `--mode apply` needs your consent
+```
+
+* **plan / observe / advise** never change anything. Numbers carry their
+  provenance (`measured`, `runtime_reported`, `estimated`, ...); what MEMBRANE
+  cannot know is `unknown`, never 0.
+* **apply** is a dry run unless you pass `--yes` (or confirm on a terminal).
+  It only creates an action when a runtime has a real control primitive and
+  the target value is explicit, re-checks live state before changing
+  anything, rolls back on failure, and keeps a local audit log. MEMBRANE
+  never guesses a target value. [`docs/active-control.md`](docs/active-control.md)
+* **adapt** is off by default. When enabled it watches for *sustained*
+  measured memory pressure and suggests (or, if you opted into apply mode,
+  takes) the least disruptive step -- with cooldown, a rate limit,
+  anti-thrashing, and your manual changes always winning. It has no mutation
+  path of its own. [`docs/adaptive-runtime.md`](docs/adaptive-runtime.md)
+
+## More than one runtime
+
+```bash
+membrane run qwen2.5-1.5b-instruct --explain   # which runtime fits, and why
+```
+
+`membrane run MODEL` considers the native runtime, Ollama and vLLM from the
+same facts (availability, capabilities, whether the model is there and loaded,
+Planner v2 where MEMBRANE can plan) and **prints why** it chose. No opaque
+score, no preference for MEMBRANE's own runtime. Ollama and vLLM are
+read-mostly: MEMBRANE does not launch them; for Ollama the only change it can
+make is an explicit unload, and vLLM fixes its model and memory at launch, so
+it is inspect/advise/orchestrate only. All enumerated GPUs are kept in the
+hardware picture; MEMBRANE does **not** claim multi-GPU execution.
+[`docs/orchestration.md`](docs/orchestration.md),
+[`docs/runtime-vllm.md`](docs/runtime-vllm.md),
+[`docs/runtime-ollama.md`](docs/runtime-ollama.md)
+
+## Models
+
+`membrane models` (installed), `membrane models available` (the curated
+catalog: tiny, general, multilingual, coding, reasoning, long-context -- each
+with its purpose, size, license, and an honest evidence label: `validated`,
+`smoke-tested` or `metadata-only`), `membrane models recommend` (what fits this
+computer). MEMBRANE manages the runtime, not the intelligence of a model: a
+tiny smoke-test model may echo or ramble, and that is the model, not a broken
+runtime -- [`docs/model-quality.md`](docs/model-quality.md),
+[`docs/model-catalog.md`](docs/model-catalog.md).
+
+## Chat from your terminal
+
+```bash
+membrane serve      # or: membrane service install && membrane service start
+membrane chat
+```
+
+```
+MEMBRANE Chat -- qwen2.5-1.5b-instruct
+Endpoint: http://127.0.0.1:8642
+Type /help for commands.
+
+You: hello
+Assistant: Hello! How can I help?
+```
+
+A thin client of the local server: streamed replies, in-memory history for
+the session (never written to disk), and a few slash commands (`/help`,
+`/clear`, `/model`, `/exit`). With no model selected, on a terminal it offers
+a list.
 
 ## Talk to it from your app
 
 ```bash
 curl http://127.0.0.1:8642/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model": "qwen2.5:7b", "messages": [{"role": "user", "content": "Hello"}]}'
+  -d '{"model": "qwen2.5-1.5b-instruct", "messages": [{"role": "user", "content": "Hello"}]}'
 ```
 
-Or point any OpenAI-compatible client at `http://127.0.0.1:8642/v1`
-with any placeholder API key (this server has no authentication of its
-own — loopback-only is its real security boundary). Real, tested this
-project: the official Python and Node.js `openai` SDKs
-(`client.models.list()`, non-streaming and streaming
-`chat.completions.create()`, real `stop`-sequence early termination,
-real tool-calling/`response_format` rejection). Streaming
-(`stream: true`, real Server-Sent Events) and a live model switch
-(just send a different `"model"` — no restart, no admin call) both
-work the same way. See
-[`docs/client-compatibility.md`](docs/client-compatibility.md) for the
-exact, honestly-labeled client matrix — never "should work," always
-what was actually run.
-
-`membrane doctor` checks installation, hardware, the model registry,
-config, the service, and the HTTP endpoint in one pass, and tells you
-exactly what (if anything) needs attention.
+Or point any OpenAI-compatible client at `http://127.0.0.1:8642/v1` with any
+placeholder API key. The server has no authentication of its own and sends no
+CORS headers: **loopback-only binding is the security boundary**
+([`docs/security-model.md`](docs/security-model.md)). Tested with the official
+Python and Node.js `openai` SDKs (`models.list()`, non-streaming and streaming
+`chat.completions.create()`, real `stop` sequences, explicit rejection of
+tool-calling and `response_format`) -- the exact matrix is in
+[`docs/client-compatibility.md`](docs/client-compatibility.md). The API is
+deliberately generic (no application-specific endpoints):
+[`docs/integrations.md`](docs/integrations.md).
 
 ## What MEMBRANE adds on top of llama.cpp
 
@@ -91,29 +193,42 @@ nothing about it changes underneath MEMBRANE's own product layer.
 
 Read before you rely on this in production:
 
-- **OpenAI-compatible chat API subset, not the full OpenAI API** — no
+- **An OpenAI-compatible chat API subset, not the full OpenAI API** — no
   tool calling (`tools`/`tool_choice` are explicitly rejected, never
   silently dropped), no `/v1/embeddings`, no `response_format` beyond
   the default. See [`docs/api-contract.md`](docs/api-contract.md).
-- **One active loaded model at a time** — no multi-model simultaneous
-  residency, no continuous batching yet.
+- **Bounded concurrency, not unlimited throughput** — up to 2 resident
+  models at once (LRU eviction, pinning), up to 2 concurrent decodes
+  per process (both env-overridable for testing only, not documented/
+  supported knobs) — deliberately conservative, real-memory-motivated,
+  never marketed as a performance/throughput feature. See
+  [`docs/soak-and-concurrency-testing.md`](docs/soak-and-concurrency-testing.md).
 - **Open WebUI and Continue are not both independently validated
   end-to-end yet** — real for two SDKs and curl; see
   [`docs/client-compatibility.md`](docs/client-compatibility.md).
-- **`--ctx auto` cannot read real host memory on Windows or macOS
-  yet** — Linux only; disclosed, not silently assumed to work. See
+- **No official Windows or macOS package yet** — real per-PR CI
+  validation exists for both (including real `--ctx auto` host-memory
+  sizing as of v1.0.0), source build only. See
   [`docs/support-matrix.md`](docs/support-matrix.md).
 - **Backend/platform evidence is real but scoped**: one real CUDA
   device, one real (paravirtualized) Metal device, real Windows/macOS
-  CPU on hosted CI — not a claim about every GPU/OS combination. No
-  official Windows or macOS package yet.
+  CPU on hosted CI — not a claim about every GPU/OS combination.
 - **Model-family compatibility evidence is scoped to the exact tested
   fixtures** (SmolLM2-135M/360M, Qwen2.5-1.5B) — see
   [`docs/model-compatibility.md`](docs/model-compatibility.md); a
   shared architecture name is not itself evidence.
 - **Independent, external multi-host validation remains limited** —
   most real evidence is the maintainer's own hardware plus GitHub-
-  hosted CI, disclosed throughout, not hidden.
+  hosted CI, disclosed throughout, not hidden. Real external
+  contributions do exist (see
+  [`docs/external-validation.md`](docs/external-validation.md)) but
+  are reviewed on their own timeline, not folded into a release
+  automatically.
+- **No multi-GPU execution, no distributed orchestration.** Topology and
+  device visibility only; the native runtime uses one device per model.
+  Ollama/vLLM support is scoped (see the runtime matrix in
+  [`docs/support-matrix.md`](docs/support-matrix.md)) and was tested against
+  mock servers following the audited API shapes, not against live daemons.
 - **No authentication on the local server** — loopback-only binding is
   the real security boundary; remote exposure is your own
   responsibility (`--allow-non-loopback` warns loudly).
@@ -257,12 +372,15 @@ text only, not a token-ID or numeric quantization-error claim.
 
 | Supported | Evidence-scoped (real, but narrow) | Not a product path | Research only |
 |---|---|---|---|
-| CPU inference | CUDA (one real device, source build only) | Continuous batching | Dynamic/runtime KV migration |
-| Vulkan GPU offload | Metal (one real, paravirtualized device) | Multi-model simultaneous residency | Per-layer mixed `q8`/`q5` precision |
-| KV precision: `q8`, `q5`, adaptive | Windows (real CPU CI, no GPU tested) | Tool calling / `/v1/embeddings` | FPGA/CXL (simulation/synthesis-tool evidence only) |
-| Static CPU/GPU KV residency | macOS (real CI, paravirtual Metal) | | |
+| CPU inference | CUDA (one real device, source build only) | Tool calling / `/v1/embeddings` | Dynamic/runtime KV migration |
+| Vulkan GPU offload | Metal (one real, paravirtualized device) | Structured JSON response mode | Per-layer mixed `q8`/`q5` precision |
+| KV precision: `q8`, `q5`, adaptive | Windows (real CPU CI, real `--ctx auto`) | | FPGA/CXL (simulation/synthesis-tool evidence only) |
+| Static CPU/GPU KV residency | macOS (real CI, paravirtual Metal, real `--ctx auto`) | | |
 | `--auto` planning, `membrane use`/`setup`/`doctor` | | | |
 | OpenAI-compatible chat API (streaming, stop, bounded admission) | | | |
+| Bounded concurrent decode (multiple simultaneous requests) | | | |
+| Bounded multi-model residency (up to 2, LRU eviction, pinning) | | | |
+| `GET /membrane/v1/capabilities` (real, live discovery) | | | |
 | JSON diagnostics (`schema_version: 1`) | | | |
 
 See [`docs/support-matrix.md`](docs/support-matrix.md) for the exact,
@@ -285,9 +403,13 @@ exact validated model families.
   snapshots, not measured peak VRAM or an OOM guarantee.
 - `q8`/`q5`/adaptive KV precision is validated only for `LLM_ARCH_LLAMA`
   models — checked and rejected for other architectures before use.
-- One model loaded at a time; a live switch (`membrane use`, or simply
-  a different `"model"` field in a chat request) unloads the previous
-  one first.
+- Up to 2 resident models at once (deterministic LRU eviction,
+  optional pinning); a live switch (`membrane use`, or simply a
+  different `"model"` field in a chat request) reuses an already-
+  resident model instantly, or evicts the least-recently-used
+  unpinned/idle one to make room — never unlimited, never silent.
+  `docs/server.md`'s own "Multi-model residency" section has the full
+  policy.
 
 Mechanism detail: `docs/live-runtime.md` (KV precision) and
 `docs/kv-residency.md` (KV placement). Full architecture/backend/
@@ -305,17 +427,19 @@ live in
 **[kadireren7/membrane-research](https://github.com/kadireren7/membrane-research)**,
 with SHA256-verified provenance back to this repository.
 
-**Release status**: latest stable tag `v0.8.0` (supersedes `v0.4.0`,
-now historical). This release consolidates Mega Phase D: the model
-catalog/download/variant-selection pipeline, real CUDA and Metal
-backend evidence, real Windows support, `membrane use`'s consent-gated
-install/live-switch model lifecycle, and real OpenAI-compatible client
-validation (Python and Node.js SDKs) — see
-[docs/release-v0.8.0.md](docs/release-v0.8.0.md) for the full release
-notes and [docs/upgrade-v0.4-to-v0.8.md](docs/upgrade-v0.4-to-v0.8.md)
-if you're upgrading from v0.4.0. See "Known limitations" above for what
-this release does not claim. CPU-only default behavior (no flags, or
-`--gpu-layers 0`) is unchanged by any of this.
+**Release status**: latest stable tag `v1.1.0` (supersedes `v1.0.0`, now
+historical). v1.1.0 adds the control side of MEMBRANE on top of v1.0.0's
+runtime: `observe` / `advise` / `apply` (dry run by default) / opt-in
+`adaptive`, runtime orchestration across the native runtime, Ollama and vLLM
+(`membrane run`), and a product-grade CLI (status screen, `models`, picker,
+suggest-and-confirm name matching, concise output, a diagnosing `doctor`).
+Everything is additive: the OpenAI-compatible API v1, the `--json` shapes and
+existing registries/configs are unchanged
+([docs/release-v1.1.0.md](docs/release-v1.1.0.md),
+[docs/upgrade-v1.0-to-v1.1.md](docs/upgrade-v1.0-to-v1.1.md)). See "Known
+limitations" above for what it does not claim -- notably that adaptive
+pressure handling is validated by a synthetic timeline, that Ollama/vLLM were
+tested against mock servers, and that there is no multi-GPU execution.
 
 ## AI-assisted development
 

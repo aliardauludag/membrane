@@ -25,6 +25,7 @@ EVIDENCE_PATH = REPO_ROOT / "results" / "product-onboarding" / "validation.json"
 README_PATH = REPO_ROOT / "README.md"
 MEMBRANE_DIR = REPO_ROOT / "tools" / "membrane"
 DOCTOR_CMD_CPP_PATH = MEMBRANE_DIR / "doctor_cmd.cpp"
+SERVICE_STATE_CPP_PATH = MEMBRANE_DIR / "service_state.cpp"
 SETUP_CMD_CPP_PATH = MEMBRANE_DIR / "setup_cmd.cpp"
 MEMBRANE_CMAKE_PATH = MEMBRANE_DIR / "CMakeLists.txt"
 PRODUCT_CLI_H_PATH = REPO_ROOT / "tools" / "membrane-run" / "product_cli.h"
@@ -112,15 +113,20 @@ def _c5():
 	return ok, f"has_setup={has_setup} has_doctor={has_doctor}"
 
 
-@check("no premature v1.0/CUDA-support/GUI claim anywhere in README "
-	"(Mega Phase C's own explicit scope boundaries) -- a disclaimer "
-	"that CUDA/a GUI is NOT supported is fine and expected, only a "
-	"positive claim of either is flagged")
+@check("no premature CUDA-enabled-by-default/GUI claim anywhere in "
+	"README (Mega Phase C's own explicit scope boundaries) -- a "
+	"disclaimer that CUDA/a GUI is NOT supported is fine and expected, "
+	"only a positive claim of either is flagged. The sibling v1.0.x "
+	"guard this check originally also carried was retired in Mega "
+	"Phase E, PR E6: v1.0.0 is this project's own real, current, "
+	"evidence-backed release as of that phase, not a premature claim "
+	"-- see docs/release-v1.0.0.md/results/release-v1.0.0/"
+	"readiness.json for the real evidence a v1.0 claim now rests on.")
 def _c6():
 	text = README_PATH.read_text()
 	bad = []
 	pattern = re.compile(
-		r"\bv1\.0\.\d+\b|\bCUDA[- ]enabled\b|\bsupports? CUDA\b|"
+		r"\bCUDA[- ]enabled\b|\bsupports? CUDA\b|"
 		r"\bCUDA support\b(?!\s+is not)|\bhas a (?:graphical|native) "
 		r"(?:user interface|GUI)\b", re.IGNORECASE)
 	for m in pattern.finditer(text):
@@ -128,11 +134,11 @@ def _c6():
 	return len(bad) == 0, "; ".join(bad) if bad else "no scope-violating claim"
 
 
-@check("live MEMBRANE_VERSION is v0.4.0 (bumped by PR C4)")
+@check("live MEMBRANE_VERSION is v1.1.0")
 def _c7():
 	text = PRODUCT_CLI_H_PATH.read_text()
 	m = re.search(r'#\s*define\s+MEMBRANE_VERSION\s+"([^"]+)"', text)
-	ok = m is not None and m.group(1) == "0.8.0"
+	ok = m is not None and m.group(1) == "1.1.0"
 	return ok, f"MEMBRANE_VERSION={m.group(1) if m else '(not found)'}"
 
 
@@ -147,11 +153,19 @@ def _c8():
 	"subprocess exit-code check, never a shelled-out which/command -v "
 	"(Section 43's own 'no shell injection' spirit)")
 def _c9():
-	text = DOCTOR_CMD_CPP_PATH.read_text()
-	has_real_check = "exit_code == 127" in text
-	has_shell_lookup = re.search(r'"command -v|"which ', text) is not None
-	ok = has_real_check and not has_shell_lookup
-	return ok, (f"has_real_check={has_real_check} "
+	# The service-manager probe was centralized in service_state.cpp after
+	# product onboarding. Doctor consumes that single probe instead of
+	# duplicating subprocess logic, so guard both the implementation and its
+	# call site against regression.
+	doctor_text = DOCTOR_CMD_CPP_PATH.read_text()
+	service_state_text = SERVICE_STATE_CPP_PATH.read_text()
+	has_shared_probe = "membrane_probe_service()" in doctor_text
+	has_real_check = "exit_code == 127" in service_state_text
+	has_shell_lookup = re.search(r'"command -v|"which ',
+		doctor_text + service_state_text) is not None
+	ok = has_shared_probe and has_real_check and not has_shell_lookup
+	return ok, (f"has_shared_probe={has_shared_probe} "
+		f"has_real_check={has_real_check} "
 		f"has_shell_lookup={has_shell_lookup}")
 
 

@@ -1,4 +1,6 @@
 #include "use_cmd.h"
+#include "model_resolve.h"
+#include "model_views.h"
 
 #include <cerrno>
 #include <cstdio>
@@ -15,6 +17,7 @@
 #include "model_cmd.h"
 #include "status_client.h"
 #include "doctor_cmd.h"
+#include "service_state.h"
 #include "cli_shared.h"
 #include "product_cli.h"
 #include "runtime_session.h"
@@ -117,12 +120,8 @@ static bool	parse_use_args(const std::vector<std::string> &args,
 			return (false);
 		}
 	}
-	if (o->name.empty())
-	{
-		*err = "usage: membrane use MODEL [--quant QUANT] [--yes]";
-		return (false);
-	}
-	return (true);
+	return (true);			/* an empty name opens the picker (a terminal) or
+							 * explains what to do (no terminal) */
 }
 
 static bool	doctor_gpu_available(void)
@@ -213,6 +212,75 @@ int	membrane_use_cmd_dispatch(const std::vector<std::string> &args,
 		return (MEMBRANE_EXIT_MODEL_ERROR);
 	}
 
+	/* Final productization (P3/P4). No model named: pick one on a terminal.
+	 * A name that matches nothing exactly: match it forgivingly (prefix,
+	 * substring, typo) but NEVER act on a guess without the user confirming
+	 * it -- `use` can download and load. */
+	{
+		membrane_resolve_io_t	rio = membrane_resolve_io_for_terminal();
+
+		rio.interactive = rio.interactive && !want_json;
+		if (o.name.empty())
+		{
+			std::vector<membrane_model_row_t>	rows;
+			std::string							title = "Installed models";
+
+			membrane_model_rows_installed(&rows, true);
+			if (rows.empty())
+			{
+				membrane_model_rows_catalog(&rows);
+				title = "Models you can install";
+			}
+			if (!rio.interactive)
+			{
+				std::string	msg = "no model given. Usage: membrane use MODEL "
+					"[--quant QUANT] [--yes]. ";
+
+				msg += rows.empty() ? "Nothing to choose from." : "Run it "
+					"on a terminal to pick from a list, or name one of: ";
+				for (size_t i = 0; i < rows.size() && i < 6; ++i)
+					msg += (i ? ", " : "") + rows[i].id;
+				print_err(want_json, "CLI_ERROR", msg);
+				return (MEMBRANE_EXIT_CLI_ERROR);
+			}
+			int	pick = membrane_model_pick(title, rows, rio);
+
+			if (pick < 0)
+			{
+				printf("Cancelled. Nothing was changed.\n");
+				return (MEMBRANE_EXIT_CLI_ERROR);
+			}
+			o.name = rows[(size_t)pick].id;
+		}
+		else if (membrane_registry_find(reg, o.name) == NULL)
+		{
+			membrane_catalog_t	cat0 = membrane_catalog_load();
+
+			if (membrane_catalog_resolve(cat0, o.name) == NULL)
+			{
+				std::vector<membrane_model_cand_t>	cands
+					= membrane_model_candidates(true);
+				membrane_resolve_result_t			rr
+					= membrane_model_resolve(o.name, cands, "membrane use",
+						rio);
+
+				if (rr.status == MEMBRANE_RESOLVE_EXACT
+					|| rr.status == MEMBRANE_RESOLVE_CONFIRMED)
+					o.name = rr.id;
+				else if (rr.status == MEMBRANE_RESOLVE_DECLINED)
+				{
+					printf("Cancelled. Nothing was changed.\n");
+					return (MEMBRANE_EXIT_CLI_ERROR);
+				}
+				else if (rr.status == MEMBRANE_RESOLVE_NEEDS_CHOICE)
+				{
+					print_err(want_json, "AMBIGUOUS_MODEL", rr.message);
+					return (MEMBRANE_EXIT_CLI_ERROR);
+				}
+			}
+		}
+	}
+
 	/* Section 23: resolution precedence -- (1) an exact, already-
 	 * registered name always wins outright (never re-resolved against
 	 * the catalog at all, even if a catalog family happens to share the
@@ -284,9 +352,30 @@ int	membrane_use_cmd_dispatch(const std::vector<std::string> &args,
 		if (consent_rc != MEMBRANE_EXIT_SUCCESS)
 			return (consent_rc);
 
+		/* --auto-selected: passed ONLY when o.requested_quant was empty,
+		 * i.e. this variant is MEMBRANE's OWN recommendation from
+		 * membrane_select_variant() above (already fit-checked in
+		 * preview_and_consent()'s own preview output) -- never sent when
+		 * the user themselves typed `membrane use ... --quant X`, which
+		 * is a real, manual override and must keep cmd_install's existing
+		 * "warn and proceed anyway" treatment. This distinction lets
+		 * cmd_install's fresh, immediately-before-download re-check tell
+		 * "available memory genuinely changed since the recommendation"
+		 * apart from "the user forced this" when the two disagree -- see
+		 * variant_selector.h's own membrane_variant_install_decide() top
+		 * comment for the real v1.0.0 user-session bug this closes (this
+		 * exact internal re-dispatch used to be indistinguishable from a
+		 * real --quant override, so a stale recommendation silently
+		 * became "proceeding anyway because you asked for it
+		 * explicitly"). */
+		std::vector<std::string>	install_args = {"install", fam->name,
+				"--quant", variant->quant};
+
+		if (o.requested_quant.empty())
+			install_args.push_back("--auto-selected");
+
 		int	install_rc = membrane_cli_dispatch_silently_if_json(want_json,
-				{"install", fam->name, "--quant", variant->quant},
-				membrane_model_cmd_dispatch);
+				install_args, membrane_model_cmd_dispatch);
 
 		if (install_rc != MEMBRANE_EXIT_SUCCESS)
 		{
@@ -387,8 +476,18 @@ int	membrane_use_cmd_dispatch(const std::vector<std::string> &args,
 
 	if (!reachable)
 	{
+		/* Real v1.0.0 user-session finding: this used to unconditionally
+		 * say "Start it with: membrane service start" even when no
+		 * background service had ever been installed -- `membrane
+		 * service start` then failed with systemd's raw "Unit
+		 * membrane.service not found." State-aware guidance via the one
+		 * shared probe (service_state.h) instead: never recommends
+		 * `service start` unless a real unit/plist/task actually exists. */
+		membrane_service_probe_t	probe = membrane_probe_service();
+
 		result["active_model"] = nullptr;
 		result["result"] = "selected";
+		result["service_installed"] = probe.installed;
 		if (want_json)
 			printf("%s\n", result.dump().c_str());
 		else
@@ -398,8 +497,17 @@ int	membrane_use_cmd_dispatch(const std::vector<std::string> &args,
 				printf("Note: the registered file's size/mtime changed "
 					"since it was added -- cached metadata may be "
 					"stale.\n");
-			printf("Service is not running. Start it with: membrane "
-				"service start\n");
+			if (!probe.manager_available || !probe.installed)
+				printf("Service is not installed.\nRun `membrane serve` "
+					"for the current terminal, or install the background "
+					"service with:\n  membrane service install\n");
+			else if (!probe.active)
+				printf("Service is installed but not running.\nStart it "
+					"with:\n  membrane service start\n");
+			else
+				printf("Service is installed and reports running, but is "
+					"not reachable yet -- it may still be starting; check "
+					"`membrane service logs`.\n");
 		}
 		return (MEMBRANE_EXIT_SUCCESS);
 	}
@@ -448,7 +556,19 @@ int	membrane_use_cmd_dispatch(const std::vector<std::string> &args,
 	if (currently_active)
 	{
 		result["active_model"] = resolved_name;
-		result["backend"] = status_json.value("backend", std::string("?"));
+		{
+			/* the backend is a per-resident-model fact in /v1/status
+			 * (resident_models[].backend), not a top-level field -- the
+			 * old top-level read always printed "?" */
+			std::string	backend = "unknown";
+
+			if (status_json.contains("resident_models")
+				&& status_json["resident_models"].is_array())
+				for (const auto &m : status_json["resident_models"])
+					if (m.value("model", std::string()) == resolved_name)
+						backend = m.value("backend", std::string("unknown"));
+			result["backend"] = backend;
+		}
 		result["result"] = "already_active";
 		if (want_json)
 			printf("%s\n", result.dump().c_str());

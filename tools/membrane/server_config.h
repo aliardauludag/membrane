@@ -3,6 +3,7 @@
 
 # include <cstdint>
 # include <string>
+# include <vector>
 
 /*
  * Mega Phase B, PR B1: a small, persistent server config -- Section 8 of
@@ -21,6 +22,59 @@
  * schema.
  */
 
+/*
+ * Milestone J (active control): the explicit, user-requested LOAD/REQUEST
+ * overrides `membrane apply` can persist, and the only way a native
+ * service's automatic context/GPU-layer/KV choices are ever changed.
+ * Every field is optional (has_* == false = "automatic", the pre-J
+ * behavior, byte-for-byte). Consumed by server.cpp's fill_auto_opts()
+ * and request paths; never written by anything but `membrane apply`
+ * (or the user editing server.json). Values are validated on load --
+ * an invalid overrides block fails the whole config load (fail closed)
+ * instead of being partially honored.
+ */
+typedef struct s_membrane_server_overrides
+{
+	bool		has_context = false;
+	uint64_t	context = 0;		/* fixed context tokens per request */
+	bool		has_kv_precision = false;
+	std::string	kv_precision;		/* native|q8|q5 */
+	bool		has_kv_placement = false;
+	std::string	kv_placement;		/* default|cpu|gpu|auto */
+	bool		has_gpu_layers = false;
+	int32_t		gpu_layers = 0;			/* -1 = all, -2 = auto, N >= 0 */
+}	membrane_server_overrides_t;
+
+bool	membrane_server_overrides_empty(const membrane_server_overrides_t &o);
+bool	membrane_server_overrides_equal(const membrane_server_overrides_t &a,
+			const membrane_server_overrides_t &b);
+/* "" when valid, else a short reason. */
+std::string	membrane_server_overrides_validate(
+			const membrane_server_overrides_t &o);
+
+/*
+ * Milestone K: the persisted adaptive-runtime policy (docs/adaptive-
+ * runtime.md). OPT-IN: a missing block, or enabled=false, means adaptive
+ * control does nothing. Written by `membrane adaptive enable|disable`,
+ * never required to be hand-edited. Value semantics (mode names, class
+ * names, ranges) are validated by adaptive.h when the controller builds
+ * its policy; here only the JSON types are checked, and a bad type fails
+ * the whole load (fail closed).
+ */
+typedef struct s_membrane_server_adaptive
+{
+	bool		present = false;
+	bool		enabled = false;
+	std::string	mode = "recommend";			/* observe|recommend|apply */
+	std::string	runtime = "membrane-native";
+	int32_t		interval_s = 30;
+	int32_t		cooldown_s = 600;
+	std::vector<std::string>	allow = {"context", "kv_precision"};
+	std::string	min_pressure = "warning";
+	int32_t		max_actions_per_window = 2;
+	bool		auto_restore = false;
+}	membrane_server_adaptive_t;
+
 typedef struct s_membrane_server_config
 {
 	int32_t		schema_version;		/* == 1 today */
@@ -33,6 +87,9 @@ typedef struct s_membrane_server_config
 	std::string	log_level;			/* "info" default -- currently
 									 * informational only; no logger
 									 * exists yet to consult it */
+	membrane_server_overrides_t	overrides;	/* Milestone J; absent = all
+									 * automatic */
+	membrane_server_adaptive_t	adaptive;	/* Milestone K; absent = off */
 }	membrane_server_config_t;
 
 typedef struct s_membrane_server_config_error

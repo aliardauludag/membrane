@@ -151,13 +151,43 @@ target_include_directories(membrane_utf8_stream PUBLIC
 # directly into the `membrane` executable, so test_server.cpp (below) can
 # link and drive a REAL membrane_server_run() instance without duplicating
 # any of its code.
+## Post-v1 product-polish: the ONE authoritative chat-completion
+## finish_reason decision (chat_finish_reason.h's own top comment) --
+## its own tiny, pure, llama-free/httplib-free library so its unit test
+## links nothing heavier than this one function.
+add_library(membrane_chat_finish_reason STATIC chat_finish_reason.cpp)
+set_target_properties(membrane_chat_finish_reason PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED ON)
+target_link_libraries(membrane_chat_finish_reason PUBLIC membrane_sanitizers)
+target_include_directories(membrane_chat_finish_reason PUBLIC
+  ${CMAKE_SOURCE_DIR}/tools/membrane)
+
+# Milestone K: the adaptive controller (adaptive_controller.h) -- one thread
+# inside `membrane serve`, driving the pure membrane_adaptive layer and the
+# J apply pipeline.
+add_library(membrane_adaptive_controller STATIC adaptive_controller.cpp)
+set_target_properties(membrane_adaptive_controller PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED ON)
+target_link_libraries(membrane_adaptive_controller PUBLIC membrane_sanitizers
+  membrane_adaptive membrane_apply_cmd membrane_advise_cmd
+  membrane_server_config Threads::Threads)
+target_include_directories(membrane_adaptive_controller PUBLIC
+  ${CMAKE_SOURCE_DIR}/tools/membrane
+  ${CMAKE_SOURCE_DIR}/tools/membrane-run
+  ${MEMBRANE_NLOHMANN_JSON_INCLUDE_DIR})
+target_include_directories(membrane_adaptive_controller PRIVATE
+  ${CMAKE_SOURCE_DIR}/third_party/llama.cpp/ggml/include)
+
 add_library(membrane_server STATIC server.cpp)
 set_target_properties(membrane_server PROPERTIES
   CXX_STANDARD 17
   CXX_STANDARD_REQUIRED ON)
 target_link_libraries(membrane_server PUBLIC membrane_registry_core
   membrane_runtime_session membrane_cpp_httplib membrane_product_cli
-  membrane_utf8_stream llama)
+  membrane_utf8_stream membrane_chat_finish_reason membrane_server_config
+  membrane_adaptive_controller llama)
 target_include_directories(membrane_server PUBLIC
   ${CMAKE_SOURCE_DIR}/tools/membrane)
 target_include_directories(membrane_server PRIVATE
@@ -181,6 +211,23 @@ target_include_directories(membrane_status_client PUBLIC
 target_include_directories(membrane_status_client PRIVATE
   ${MEMBRANE_NLOHMANN_JSON_INCLUDE_DIR})
 
+# Post-v1 product-polish, PR 1: the one real per-platform "is MEMBRANE's
+# own background service installed/active right now" probe (service_
+# state.h's own top comment) -- extracted out of doctor_cmd.cpp's
+# pre-existing check_service() so `membrane doctor`, `membrane use`,
+# `membrane model pin/unpin`, and `membrane service start`'s own new
+# not-installed guard (below) all read the exact same real state instead
+# of five independently-drifting subprocess calls.
+add_library(membrane_service_state STATIC service_state.cpp)
+set_target_properties(membrane_service_state PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED ON)
+target_link_libraries(membrane_service_state PUBLIC membrane_sanitizers
+  membrane_subprocess membrane_systemd_unit membrane_launchd_unit
+  membrane_windows_task)
+target_include_directories(membrane_service_state PUBLIC
+  ${CMAKE_SOURCE_DIR}/tools/membrane)
+
 # Mega Phase B, PR B1: `membrane service ...` itself (service_cmd.h's own
 # top comment) -- installs/manages membrane.service as a systemd --user
 # unit; never a second daemon-supervision implementation.
@@ -199,7 +246,7 @@ set_target_properties(membrane_service_cmd PROPERTIES
 target_link_libraries(membrane_service_cmd PUBLIC membrane_sanitizers
   membrane_systemd_unit membrane_launchd_unit membrane_windows_task
   membrane_server_config membrane_subprocess membrane_status_client
-  membrane_fs_util membrane_product_cli)
+  membrane_service_state membrane_fs_util membrane_product_cli)
 target_include_directories(membrane_service_cmd PUBLIC
   ${CMAKE_SOURCE_DIR}/tools/membrane)
 target_include_directories(membrane_service_cmd PRIVATE
@@ -215,9 +262,10 @@ set_target_properties(membrane_doctor_cmd PROPERTIES
   CXX_STANDARD 17
   CXX_STANDARD_REQUIRED ON)
 target_link_libraries(membrane_doctor_cmd PUBLIC membrane_sanitizers
-  membrane_registry_core membrane_server_config membrane_systemd_unit
-  membrane_launchd_unit membrane_windows_task membrane_subprocess
-  membrane_status_client membrane_product_cli)
+  membrane_registry_core membrane_server_config membrane_subprocess
+  membrane_status_client membrane_service_state membrane_product_cli
+  membrane_ui membrane_adaptive membrane_adaptive_controller
+  membrane_runtime_adapters)
 target_include_directories(membrane_doctor_cmd PUBLIC
   ${CMAKE_SOURCE_DIR}/tools/membrane)
 target_include_directories(membrane_doctor_cmd PRIVATE
@@ -315,10 +363,303 @@ set_target_properties(membrane_use_cmd PROPERTIES
 target_link_libraries(membrane_use_cmd PUBLIC membrane_sanitizers
   membrane_registry_core membrane_server_config membrane_model_catalog
   membrane_variant_selector membrane_status_client membrane_doctor_cmd
-  membrane_cli_shared membrane_product_cli llama)
+  membrane_service_state membrane_cli_shared membrane_product_cli
+  membrane_models_cmd llama)
 target_include_directories(membrane_use_cmd PUBLIC
   ${CMAKE_SOURCE_DIR}/tools/membrane)
 target_include_directories(membrane_use_cmd PRIVATE
+  ${CMAKE_SOURCE_DIR}/tools/membrane-run
+  ${MEMBRANE_NLOHMANN_JSON_INCLUDE_DIR})
+
+# Milestone G1 (Planner v2 foundation): `membrane plan MODEL` -- a
+# READ-ONLY orchestrator over registry_core.h/model_catalog.h (identity),
+# variant_selector.h (catalog-only quant estimate), gpu_device.h/
+# runtime_session.h (one real hardware snapshot), and
+# membrane_context_recommender (the actual context/GPU-layers/KV-
+# precision/KV-placement decision, real ggml_row_size()-based KV bytes),
+# assembled into the common membrane_plan_t representation
+# (membrane_plan.h). See plan_cmd.h's own top comment for the read-only
+# contract.
+# Milestone H3: runtime_plan_cmd.cpp adds `membrane plan MODEL --runtime
+# ID` (read-only runtime applicability assessment) on top of the
+# unchanged Planner v2 path.
+add_library(membrane_plan_cmd STATIC plan_cmd.cpp runtime_plan_cmd.cpp)
+set_target_properties(membrane_plan_cmd PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED ON)
+target_link_libraries(membrane_plan_cmd PUBLIC membrane_sanitizers
+  membrane_registry_core membrane_model_catalog membrane_variant_selector
+  membrane_gpu_device membrane_runtime_session membrane_kv_store_telemetry
+  membrane_plan membrane_plan_v2_resolver membrane_product_cli
+  membrane_runtime_plan_assessment membrane_runtime_adapters
+  membrane_runtime_cmd membrane_ui llama)
+target_include_directories(membrane_plan_cmd PUBLIC
+  ${CMAKE_SOURCE_DIR}/tools/membrane)
+target_include_directories(membrane_plan_cmd PRIVATE
+  ${CMAKE_SOURCE_DIR}/tools/membrane-run
+  ${MEMBRANE_NLOHMANN_JSON_INCLUDE_DIR}
+  ${CMAKE_SOURCE_DIR}/third_party/llama.cpp/ggml/include)
+
+# Milestone H1 (runtime abstraction foundation): `membrane runtime
+# list|inspect` -- a thin CLI wrapper over runtime_capabilities.h's own
+# static, llama-free runtime table (tools/membrane-run/runtime_
+# capabilities.h/.c, the membrane_runtime_capabilities library defined
+# in the root CMakeLists.txt). No registry/config/service dependency
+# at all -- see runtime_cmd.h's own top comment on the read-only
+# guarantee this command makes.
+# Milestone H2: the static runtime adapter table (runtime_adapter.h) and
+# the first external adapter, Ollama -- READ-ONLY (runtime_ollama.h's own
+# top comment: an enforced 3-call allowlist, no inference, no mutation).
+# Reuses the already-vendored cpp-httplib + nlohmann/json; no new
+# dependency. Kept out of membrane_runtime_capabilities so the generic,
+# pure capability module stays HTTP-free.
+add_library(membrane_runtime_adapters STATIC runtime_registry.cpp
+  runtime_ollama.cpp runtime_vllm.cpp)
+set_target_properties(membrane_runtime_adapters PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED ON)
+target_link_libraries(membrane_runtime_adapters PUBLIC membrane_sanitizers
+  membrane_runtime_capabilities membrane_cpp_httplib)
+target_include_directories(membrane_runtime_adapters PUBLIC
+  ${CMAKE_SOURCE_DIR}/tools/membrane
+  ${MEMBRANE_NLOHMANN_JSON_INCLUDE_DIR})
+
+add_library(membrane_runtime_cmd STATIC runtime_cmd.cpp)
+set_target_properties(membrane_runtime_cmd PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED ON)
+target_link_libraries(membrane_runtime_cmd PUBLIC membrane_sanitizers
+  membrane_runtime_capabilities membrane_runtime_adapters
+  membrane_product_cli)
+target_include_directories(membrane_runtime_cmd PUBLIC
+  ${CMAKE_SOURCE_DIR}/tools/membrane)
+target_include_directories(membrane_runtime_cmd PRIVATE
+  ${CMAKE_SOURCE_DIR}/tools/membrane-run
+  ${MEMBRANE_NLOHMANN_JSON_INCLUDE_DIR})
+
+# Post-v1 product-polish, prompt 3: the pure, llama-free/httplib-free
+# SSE incremental parser `membrane chat` uses to turn the server's own
+# real streamed wire format into plain text -- its own tiny library so
+# its unit test links nothing heavier than this one module (chat_stream_
+# parser.h's own top comment).
+add_library(membrane_chat_stream_parser STATIC chat_stream_parser.cpp)
+set_target_properties(membrane_chat_stream_parser PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED ON)
+target_link_libraries(membrane_chat_stream_parser PUBLIC membrane_sanitizers)
+target_include_directories(membrane_chat_stream_parser PUBLIC
+  ${CMAKE_SOURCE_DIR}/tools/membrane)
+target_include_directories(membrane_chat_stream_parser PRIVATE
+  ${MEMBRANE_NLOHMANN_JSON_INCLUDE_DIR})
+
+# Post-v1 product-polish, prompt 3: `membrane chat` -- a thin, human-
+# facing terminal client of the EXISTING OpenAI-compatible server
+# (chat_cmd.h's own top comment has the full architectural contract).
+# Reuses membrane_use_cmd for model resolution and membrane_doctor_cmd
+# for server-reachability guidance -- never a second model-lifecycle or
+# service-state implementation.
+add_library(membrane_chat_cmd STATIC chat_cmd.cpp)
+set_target_properties(membrane_chat_cmd PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED ON)
+target_link_libraries(membrane_chat_cmd PUBLIC membrane_sanitizers
+  membrane_chat_stream_parser membrane_server_config membrane_status_client
+  membrane_doctor_cmd membrane_use_cmd membrane_cpp_httplib
+  membrane_product_cli)
+target_include_directories(membrane_chat_cmd PUBLIC
+  ${CMAKE_SOURCE_DIR}/tools/membrane)
+target_include_directories(membrane_chat_cmd PRIVATE
+  ${MEMBRANE_NLOHMANN_JSON_INCLUDE_DIR})
+
+# Milestone I2: the runtime-agnostic half of the observation provider --
+# host/GPU mapping and snapshot rendering (observe_shared.h's own top
+# comment) -- pulled out of observe_cmd.cpp so BOTH the native provider
+# (membrane_observe_cmd, below) and the Ollama provider
+# (membrane_observe_ollama, below) can depend on it without depending on
+# each other (avoids the circular dependency a shared function inside
+# either provider's own library would create).
+add_library(membrane_observe_shared STATIC observe_shared.cpp)
+set_target_properties(membrane_observe_shared PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED ON)
+target_link_libraries(membrane_observe_shared PUBLIC membrane_sanitizers
+  membrane_observation membrane_gpu_device membrane_runtime_session
+  membrane_ui llama)
+target_include_directories(membrane_observe_shared PUBLIC
+  ${CMAKE_SOURCE_DIR}/tools/membrane
+  ${CMAKE_SOURCE_DIR}/tools/membrane-run
+  ${MEMBRANE_NLOHMANN_JSON_INCLUDE_DIR})
+target_include_directories(membrane_observe_shared PRIVATE
+  ${CMAKE_SOURCE_DIR}/third_party/llama.cpp/ggml/include)
+
+# Milestone I2: `membrane observe --runtime ollama` -- the Ollama
+# observation provider (observe_ollama.h's own top comment: READ-ONLY,
+# GET /api/version + GET /api/ps only, via membrane_runtime_adapters'
+# existing Ollama adapter) over the SAME membrane_observe_shared mapping/
+# rendering and membrane_observation snapshot model the native provider
+# uses -- no second telemetry model.
+add_library(membrane_observe_ollama STATIC observe_ollama.cpp)
+set_target_properties(membrane_observe_ollama PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED ON)
+target_link_libraries(membrane_observe_ollama PUBLIC membrane_sanitizers
+  membrane_observe_shared membrane_runtime_adapters membrane_gpu_device
+  membrane_runtime_session membrane_runtime_capabilities llama)
+target_include_directories(membrane_observe_ollama PUBLIC
+  ${CMAKE_SOURCE_DIR}/tools/membrane
+  ${CMAKE_SOURCE_DIR}/tools/membrane-run
+  ${MEMBRANE_NLOHMANN_JSON_INCLUDE_DIR})
+target_include_directories(membrane_observe_ollama PRIVATE
+  ${CMAKE_SOURCE_DIR}/third_party/llama.cpp/ggml/include)
+
+# Milestone I1 (observation foundation): `membrane observe` -- the
+# membrane-native observation provider (observe_cmd.h's own top comment:
+# READ-ONLY, reuses the existing host/GPU/service/config/status/registry/
+# GGUF probes and Planner v2 via membrane_plan_cmd) over the pure
+# membrane_observation snapshot model. Milestone I2: also dispatches
+# `--runtime ollama` to membrane_observe_ollama (observe_cmd.h's dispatch
+# doc comment).
+add_library(membrane_observe_cmd STATIC observe_cmd.cpp)
+set_target_properties(membrane_observe_cmd PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED ON)
+target_link_libraries(membrane_observe_cmd PUBLIC membrane_sanitizers
+  membrane_observation membrane_observe_shared membrane_observe_ollama
+  membrane_plan_cmd membrane_registry_core
+  membrane_server_config membrane_status_client membrane_service_state
+  membrane_gpu_device membrane_runtime_session membrane_runtime_capabilities
+  membrane_kv_residency_policy membrane_product_cli llama)
+target_include_directories(membrane_observe_cmd PUBLIC
+  ${CMAKE_SOURCE_DIR}/tools/membrane
+  ${CMAKE_SOURCE_DIR}/tools/membrane-run
+  ${MEMBRANE_NLOHMANN_JSON_INCLUDE_DIR})
+target_include_directories(membrane_observe_cmd PRIVATE
+  ${CMAKE_SOURCE_DIR}/third_party/llama.cpp/ggml/include)
+
+# Milestone I3 (memory intelligence): `membrane advise` -- the CLI for
+# the pure membrane_memory_intelligence_assemble() (tools/membrane-run/
+# memory_intelligence.h). READ-ONLY: reuses membrane_observe_cmd/
+# membrane_observe_ollama's own existing collection functions (advise_
+# cmd.h's own top comment) -- no new probe, no new Ollama route.
+add_library(membrane_advise_cmd STATIC advise_cmd.cpp)
+set_target_properties(membrane_advise_cmd PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED ON)
+target_link_libraries(membrane_advise_cmd PUBLIC membrane_sanitizers
+  membrane_memory_intelligence membrane_observation membrane_observe_cmd
+  membrane_observe_ollama membrane_runtime_capabilities membrane_product_cli
+  membrane_ui llama)
+target_include_directories(membrane_advise_cmd PUBLIC
+  ${CMAKE_SOURCE_DIR}/tools/membrane
+  ${CMAKE_SOURCE_DIR}/tools/membrane-run
+  ${MEMBRANE_NLOHMANN_JSON_INCLUDE_DIR})
+target_include_directories(membrane_advise_cmd PRIVATE
+  ${CMAKE_SOURCE_DIR}/third_party/llama.cpp/ggml/include)
+
+# Milestone J (active control): `membrane apply` -- the one mutating step
+# of plan -> observe -> advise -> apply. Reuses advise's collection and the
+# pure action compiler/engine (tools/membrane-run/action.h); talks only to
+# MEMBRANE's own loopback admin routes, server.json, and (for ollama) the
+# single allowlisted unload request. See docs/active-control.md.
+add_library(membrane_apply_cmd STATIC apply_cmd.cpp)
+set_target_properties(membrane_apply_cmd PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED ON)
+target_link_libraries(membrane_apply_cmd PUBLIC membrane_sanitizers
+  membrane_action membrane_advise_cmd membrane_plan_cmd
+  membrane_runtime_adapters membrane_status_client membrane_server_config
+  membrane_cli_shared membrane_observation membrane_runtime_capabilities
+  membrane_product_cli membrane_ui llama)
+target_include_directories(membrane_apply_cmd PUBLIC
+  ${CMAKE_SOURCE_DIR}/tools/membrane
+  ${CMAKE_SOURCE_DIR}/tools/membrane-run
+  ${MEMBRANE_NLOHMANN_JSON_INCLUDE_DIR})
+target_include_directories(membrane_apply_cmd PRIVATE
+  ${CMAKE_SOURCE_DIR}/third_party/llama.cpp/ggml/include)
+
+# Milestone L: `membrane run MODEL` -- gathers per-runtime facts through the
+# adapter table and asks the pure orchestrator which runtime fits, and why.
+add_library(membrane_orchestrate_cmd STATIC orchestrate_cmd.cpp)
+set_target_properties(membrane_orchestrate_cmd PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED ON)
+target_link_libraries(membrane_orchestrate_cmd PUBLIC membrane_sanitizers
+  membrane_orchestrator membrane_plan_cmd membrane_runtime_adapters
+  membrane_use_cmd membrane_status_client membrane_cli_shared membrane_ui
+  membrane_gpu_device membrane_runtime_session membrane_registry_core
+  membrane_server_config membrane_product_cli llama)
+target_include_directories(membrane_orchestrate_cmd PUBLIC
+  ${CMAKE_SOURCE_DIR}/tools/membrane
+  ${CMAKE_SOURCE_DIR}/tools/membrane-run
+  ${MEMBRANE_NLOHMANN_JSON_INCLUDE_DIR})
+target_include_directories(membrane_orchestrate_cmd PRIVATE
+  ${CMAKE_SOURCE_DIR}/third_party/llama.cpp/ggml/include)
+
+# Final productization: the one place human-output styling (color, symbols,
+# NO_COLOR / --no-color / TTY detection) is decided -- see ui.h.
+add_library(membrane_ui STATIC ui.cpp)
+set_target_properties(membrane_ui PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED ON)
+target_link_libraries(membrane_ui PUBLIC membrane_sanitizers)
+target_include_directories(membrane_ui PUBLIC ${CMAKE_SOURCE_DIR}/tools/membrane)
+
+# Final productization: pure model-name matcher (exact -> prefix -> substring
+# -> fuzzy) and the numbered picker, both dependency-free.
+add_library(membrane_model_match STATIC model_match.cpp picker.cpp)
+set_target_properties(membrane_model_match PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED ON)
+target_link_libraries(membrane_model_match PUBLIC membrane_sanitizers membrane_ui)
+target_include_directories(membrane_model_match PUBLIC
+  ${CMAKE_SOURCE_DIR}/tools/membrane)
+
+# Final productization: model rows (registry + catalog + live service), the
+# safe resolver (exact / suggest / pick), and `membrane models`.
+add_library(membrane_models_cmd STATIC model_views.cpp model_resolve.cpp
+  models_cmd.cpp)
+set_target_properties(membrane_models_cmd PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED ON)
+target_link_libraries(membrane_models_cmd PUBLIC membrane_sanitizers
+  membrane_model_match membrane_ui membrane_model_catalog
+  membrane_variant_selector membrane_registry_core membrane_server_config
+  membrane_status_client membrane_cli_shared membrane_runtime_session
+  membrane_product_cli llama)
+target_include_directories(membrane_models_cmd PUBLIC
+  ${CMAKE_SOURCE_DIR}/tools/membrane
+  ${CMAKE_SOURCE_DIR}/tools/membrane-run
+  ${MEMBRANE_NLOHMANN_JSON_INCLUDE_DIR})
+target_include_directories(membrane_models_cmd PRIVATE
+  ${CMAKE_SOURCE_DIR}/third_party/llama.cpp/ggml/include)
+
+# Final productization: bare `membrane` status screen (dashboard_cmd.h).
+add_library(membrane_dashboard_cmd STATIC dashboard_cmd.cpp)
+set_target_properties(membrane_dashboard_cmd PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED ON)
+target_link_libraries(membrane_dashboard_cmd PUBLIC membrane_sanitizers
+  membrane_models_cmd membrane_advise_cmd membrane_adaptive_controller
+  membrane_adaptive membrane_gpu_device membrane_service_state
+  membrane_status_client membrane_server_config membrane_ui
+  membrane_product_cli llama)
+target_include_directories(membrane_dashboard_cmd PUBLIC
+  ${CMAKE_SOURCE_DIR}/tools/membrane
+  ${CMAKE_SOURCE_DIR}/tools/membrane-run
+  ${MEMBRANE_NLOHMANN_JSON_INCLUDE_DIR})
+target_include_directories(membrane_dashboard_cmd PRIVATE
+  ${CMAKE_SOURCE_DIR}/third_party/llama.cpp/ggml/include)
+
+# Milestone K: `membrane adaptive status|enable|disable`.
+add_library(membrane_adaptive_cmd STATIC adaptive_cmd.cpp)
+set_target_properties(membrane_adaptive_cmd PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED ON)
+target_link_libraries(membrane_adaptive_cmd PUBLIC membrane_sanitizers
+  membrane_adaptive_controller membrane_adaptive membrane_server_config
+  membrane_cli_shared membrane_cpp_httplib membrane_product_cli)
+target_include_directories(membrane_adaptive_cmd PUBLIC
+  ${CMAKE_SOURCE_DIR}/tools/membrane
   ${CMAKE_SOURCE_DIR}/tools/membrane-run
   ${MEMBRANE_NLOHMANN_JSON_INCLUDE_DIR})
 
@@ -331,7 +672,11 @@ target_link_libraries(membrane PRIVATE membrane_registry_core
   membrane_runtime_session membrane_server membrane_service_cmd
   membrane_status_client membrane_server_config membrane_doctor_cmd
   membrane_setup_cmd membrane_model_catalog membrane_download_manager
-  membrane_variant_selector membrane_use_cmd membrane_cli_shared llama)
+  membrane_variant_selector membrane_use_cmd membrane_chat_cmd
+  membrane_plan_cmd membrane_runtime_cmd membrane_observe_cmd
+  membrane_advise_cmd membrane_apply_cmd membrane_adaptive_cmd membrane_ui
+  membrane_orchestrate_cmd membrane_models_cmd membrane_dashboard_cmd
+  membrane_service_state membrane_cli_shared llama)
 target_include_directories(membrane PRIVATE
   ${CMAKE_SOURCE_DIR}/tools/membrane-run
   ${CMAKE_SOURCE_DIR}/tools/membrane-llama-runtime
@@ -480,12 +825,354 @@ if(MEMBRANE_BUILD_TESTS)
     ${CMAKE_SOURCE_DIR}/third_party/llama.cpp/ggml/include)
   add_test(NAME test_use_cmd COMMAND test_use_cmd)
 
+  # Milestone G1 (Planner v2 foundation): unit/integration tests for
+  # `membrane plan` (test_plan_cmd.cpp's own top comment) -- driven
+  # in-process against the real repository fixture models/stories15M.gguf
+  # (GGUF-metadata-only reads, never a full model load), same isolated-
+  # temp-registry convention as test_use_cmd above. plan_cmd.cpp never
+  # calls membrane_model_cmd_dispatch(), so (unlike test_use_cmd/test_
+  # setup_cmd above) this test binary does not need model_cmd.cpp.
+  add_executable(test_plan_cmd test_plan_cmd.cpp)
+  set_target_properties(test_plan_cmd PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON)
+  target_link_libraries(test_plan_cmd PRIVATE membrane_plan_cmd
+    membrane_registry_core membrane_product_cli membrane_plan_v2_resolver)
+  target_include_directories(test_plan_cmd PRIVATE
+    ${CMAKE_SOURCE_DIR}/tests/unit
+    ${CMAKE_SOURCE_DIR}/tools/membrane-run
+    ${MEMBRANE_NLOHMANN_JSON_INCLUDE_DIR})
+  target_compile_definitions(test_plan_cmd PRIVATE
+    MEMBRANE_TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+  add_test(NAME test_plan_cmd COMMAND test_plan_cmd)
+
+  # Milestone H1: unit tests for `membrane runtime list|inspect`
+  # (test_runtime_cmd.cpp's own top comment) -- driven in-process, no
+  # registry/config/service isolation needed at all (unlike test_plan_
+  # cmd/test_doctor_cmd above): runtime_cmd.cpp touches none of them.
+  add_executable(test_runtime_cmd test_runtime_cmd.cpp)
+  set_target_properties(test_runtime_cmd PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON)
+  target_link_libraries(test_runtime_cmd PRIVATE membrane_runtime_cmd
+    membrane_runtime_capabilities membrane_product_cli)
+  target_include_directories(test_runtime_cmd PRIVATE
+    ${CMAKE_SOURCE_DIR}/tests/unit
+    ${CMAKE_SOURCE_DIR}/tools/membrane-run
+    ${MEMBRANE_NLOHMANN_JSON_INCLUDE_DIR})
+  add_test(NAME test_runtime_cmd COMMAND test_runtime_cmd)
+
+  # Milestone H2: the read-only Ollama adapter's own tests -- a real
+  # in-process httplib::Server on an ephemeral loopback port serves
+  # deterministic Ollama-shaped fixtures, so no Ollama install is needed
+  # (and a real Ollama on this host is never contacted: every test pins
+  # MEMBRANE_OLLAMA_ENDPOINT to the mock or to a closed port).
+  add_executable(test_runtime_ollama test_runtime_ollama.cpp)
+  set_target_properties(test_runtime_ollama PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON)
+  target_link_libraries(test_runtime_ollama PRIVATE membrane_runtime_cmd
+    membrane_runtime_adapters membrane_runtime_capabilities
+    membrane_product_cli membrane_cpp_httplib)
+  target_include_directories(test_runtime_ollama PRIVATE
+    ${CMAKE_SOURCE_DIR}/tests/unit
+    ${CMAKE_SOURCE_DIR}/tools/membrane-run
+    ${MEMBRANE_NLOHMANN_JSON_INCLUDE_DIR})
+  add_test(NAME test_runtime_ollama COMMAND test_runtime_ollama)
+
+  # Milestone H3: runtime-aware plan assessment -- pure classification
+  # tests against the real native/Ollama capability matrices, plus
+  # `membrane plan --runtime` end to end (real SmolLM2 GGUF fixture for
+  # the native path, GGUF metadata only; in-process mock server for
+  # Ollama, which is never really contacted).
+  add_executable(test_runtime_plan test_runtime_plan.cpp)
+  set_target_properties(test_runtime_plan PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON)
+  target_link_libraries(test_runtime_plan PRIVATE membrane_plan_cmd
+    membrane_runtime_plan_assessment membrane_runtime_adapters
+    membrane_registry_core membrane_product_cli membrane_cpp_httplib)
+  target_include_directories(test_runtime_plan PRIVATE
+    ${CMAKE_SOURCE_DIR}/tests/unit
+    ${CMAKE_SOURCE_DIR}/tools/membrane-run
+    ${MEMBRANE_NLOHMANN_JSON_INCLUDE_DIR}
+    ${CMAKE_SOURCE_DIR}/third_party/llama.cpp/ggml/include)
+  target_compile_definitions(test_runtime_plan PRIVATE
+    MEMBRANE_TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+  add_test(NAME test_runtime_plan COMMAND test_runtime_plan)
+
+  # Milestone I1: `membrane observe` -- pure snapshot assembly from
+  # synthetic inputs, plus the real read-only provider end to end in an
+  # isolated env (registry/config/service probe overridden; the server
+  # endpoint points at a closed loopback port or an in-process mock).
+  add_executable(test_observe_cmd test_observe_cmd.cpp)
+  set_target_properties(test_observe_cmd PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON)
+  target_link_libraries(test_observe_cmd PRIVATE membrane_observe_cmd
+    membrane_registry_core membrane_server_config membrane_product_cli
+    membrane_cpp_httplib)
+  target_include_directories(test_observe_cmd PRIVATE
+    ${CMAKE_SOURCE_DIR}/tests/unit
+    ${CMAKE_SOURCE_DIR}/tools/membrane-run
+    ${MEMBRANE_NLOHMANN_JSON_INCLUDE_DIR}
+    ${CMAKE_SOURCE_DIR}/third_party/llama.cpp/ggml/include)
+  target_compile_definitions(test_observe_cmd PRIVATE
+    MEMBRANE_TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+  add_test(NAME test_observe_cmd COMMAND test_observe_cmd)
+
+  # Milestone I2: `membrane observe --runtime ollama` -- same in-process
+  # mock-httplib-server pattern as test_runtime_ollama.cpp (a real Ollama
+  # daemon is never contacted), plus route-trap coverage proving only
+  # GET /api/version + GET /api/ps are ever requested.
+  add_executable(test_observe_ollama test_observe_ollama.cpp)
+  set_target_properties(test_observe_ollama PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON)
+  target_link_libraries(test_observe_ollama PRIVATE membrane_observe_cmd
+    membrane_runtime_adapters membrane_product_cli membrane_cpp_httplib)
+  target_include_directories(test_observe_ollama PRIVATE
+    ${CMAKE_SOURCE_DIR}/tests/unit
+    ${CMAKE_SOURCE_DIR}/tools/membrane-run
+    ${MEMBRANE_NLOHMANN_JSON_INCLUDE_DIR}
+    ${CMAKE_SOURCE_DIR}/third_party/llama.cpp/ggml/include)
+  add_test(NAME test_observe_ollama COMMAND test_observe_ollama)
+
+  # Milestone I3: `membrane advise` -- CLI-level routing/shape/
+  # determinism/read-only tests. The pure assembly logic is already
+  # covered, host-independent, by tools/membrane-run/test_memory_
+  # intelligence.c; this only proves the CLI wiring, same isolated-env/
+  # in-process-mock-server pattern as test_observe_cmd/test_observe_
+  # ollama above (never a real service, never a real Ollama daemon).
+  add_executable(test_advise_cmd test_advise_cmd.cpp)
+  set_target_properties(test_advise_cmd PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON)
+  target_link_libraries(test_advise_cmd PRIVATE membrane_advise_cmd
+    membrane_runtime_adapters membrane_product_cli membrane_cpp_httplib)
+  target_include_directories(test_advise_cmd PRIVATE
+    ${CMAKE_SOURCE_DIR}/tests/unit
+    ${CMAKE_SOURCE_DIR}/tools/membrane-run
+    ${MEMBRANE_NLOHMANN_JSON_INCLUDE_DIR}
+    ${CMAKE_SOURCE_DIR}/third_party/llama.cpp/ggml/include)
+  add_test(NAME test_advise_cmd COMMAND test_advise_cmd)
+
+  add_executable(test_model_match test_model_match.cpp)
+  set_target_properties(test_model_match PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON)
+  target_link_libraries(test_model_match PRIVATE membrane_model_match)
+  target_include_directories(test_model_match PRIVATE
+    ${CMAKE_SOURCE_DIR}/tests/unit)
+  add_test(NAME test_model_match COMMAND test_model_match)
+
+  add_executable(test_model_resolve test_model_resolve.cpp)
+  set_target_properties(test_model_resolve PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON)
+  target_link_libraries(test_model_resolve PRIVATE membrane_models_cmd)
+  target_include_directories(test_model_resolve PRIVATE
+    ${CMAKE_SOURCE_DIR}/tests/unit)
+  add_test(NAME test_model_resolve COMMAND test_model_resolve)
+
+  add_executable(test_dashboard_cmd test_dashboard_cmd.cpp)
+  set_target_properties(test_dashboard_cmd PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON)
+  target_link_libraries(test_dashboard_cmd PRIVATE membrane_dashboard_cmd)
+  target_include_directories(test_dashboard_cmd PRIVATE
+    ${CMAKE_SOURCE_DIR}/tests/unit
+    ${MEMBRANE_NLOHMANN_JSON_INCLUDE_DIR})
+  add_test(NAME test_dashboard_cmd COMMAND test_dashboard_cmd)
+
+  add_executable(test_models_cmd test_models_cmd.cpp)
+  set_target_properties(test_models_cmd PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON)
+  target_link_libraries(test_models_cmd PRIVATE membrane_models_cmd)
+  target_include_directories(test_models_cmd PRIVATE
+    ${CMAKE_SOURCE_DIR}/tests/unit
+    ${MEMBRANE_NLOHMANN_JSON_INCLUDE_DIR})
+  target_compile_definitions(test_models_cmd PRIVATE
+    MEMBRANE_TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+  add_test(NAME test_models_cmd COMMAND test_models_cmd)
+
+  add_executable(test_ui test_ui.cpp)
+  set_target_properties(test_ui PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON)
+  target_link_libraries(test_ui PRIVATE membrane_ui)
+  target_include_directories(test_ui PRIVATE ${CMAKE_SOURCE_DIR}/tests/unit)
+  add_test(NAME test_ui COMMAND test_ui)
+
+  # (orchestrate_cmd -> use_cmd -> membrane_model_cmd_dispatch(), which is
+  # compiled directly into the test binary, same shape as test_use_cmd)
+  add_executable(test_orchestrate_cmd test_orchestrate_cmd.cpp model_cmd.cpp)
+  set_target_properties(test_orchestrate_cmd PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON)
+  target_link_libraries(test_orchestrate_cmd PRIVATE membrane_orchestrate_cmd
+    membrane_runtime_adapters membrane_product_cli membrane_cpp_httplib
+    membrane_server membrane_registry_core membrane_server_config
+    membrane_gpu_device membrane_runtime_core membrane_runtime_session
+    membrane_model_catalog membrane_download_manager
+    membrane_variant_selector membrane_status_client membrane_doctor_cmd
+    membrane_cli_shared llama)
+  target_include_directories(test_orchestrate_cmd PRIVATE
+    ${CMAKE_SOURCE_DIR}/tools/membrane-llama-runtime)
+  target_include_directories(test_orchestrate_cmd PRIVATE
+    ${CMAKE_SOURCE_DIR}/tests/unit
+    ${CMAKE_SOURCE_DIR}/tools/membrane-run
+    ${MEMBRANE_NLOHMANN_JSON_INCLUDE_DIR}
+    ${CMAKE_SOURCE_DIR}/third_party/llama.cpp/ggml/include)
+  add_test(NAME test_orchestrate_cmd COMMAND test_orchestrate_cmd)
+
+  # Milestone L: the read-only vLLM adapter -- parsers, allowlist, capability
+  # contract and an in-process mock server with trap routes.
+  add_executable(test_runtime_vllm test_runtime_vllm.cpp)
+  set_target_properties(test_runtime_vllm PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON)
+  target_link_libraries(test_runtime_vllm PRIVATE membrane_runtime_adapters
+    membrane_product_cli membrane_cpp_httplib)
+  target_include_directories(test_runtime_vllm PRIVATE
+    ${CMAKE_SOURCE_DIR}/tests/unit
+    ${CMAKE_SOURCE_DIR}/tools/membrane-run
+    ${MEMBRANE_NLOHMANN_JSON_INCLUDE_DIR})
+  add_test(NAME test_runtime_vllm COMMAND test_runtime_vllm)
+
+  # Milestone K: the adaptive controller tick (fake clock, fake
+  # observations, fake executor) and the `membrane adaptive` CLI.
+  add_executable(test_adaptive_controller test_adaptive_controller.cpp)
+  set_target_properties(test_adaptive_controller PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON)
+  target_link_libraries(test_adaptive_controller PRIVATE
+    membrane_adaptive_controller membrane_runtime_adapters
+    membrane_product_cli)
+  target_include_directories(test_adaptive_controller PRIVATE
+    ${CMAKE_SOURCE_DIR}/tests/unit
+    ${CMAKE_SOURCE_DIR}/tools/membrane-run
+    ${MEMBRANE_NLOHMANN_JSON_INCLUDE_DIR}
+    ${CMAKE_SOURCE_DIR}/third_party/llama.cpp/ggml/include)
+  add_test(NAME test_adaptive_controller COMMAND test_adaptive_controller)
+
+  add_executable(test_adaptive_cmd test_adaptive_cmd.cpp)
+  set_target_properties(test_adaptive_cmd PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON)
+  target_link_libraries(test_adaptive_cmd PRIVATE membrane_adaptive_cmd
+    membrane_runtime_adapters membrane_product_cli membrane_cpp_httplib)
+  target_include_directories(test_adaptive_cmd PRIVATE
+    ${CMAKE_SOURCE_DIR}/tests/unit
+    ${CMAKE_SOURCE_DIR}/tools/membrane-run
+    ${MEMBRANE_NLOHMANN_JSON_INCLUDE_DIR}
+    ${CMAKE_SOURCE_DIR}/third_party/llama.cpp/ggml/include)
+  add_test(NAME test_adaptive_cmd COMMAND test_adaptive_cmd)
+
+  # Milestone J: `membrane apply` -- dry-run/consent/stale/rollback/audit
+  # behavior against in-process mock native and Ollama servers (no real
+  # service, no model, no inference; intelligence and the Planner v2 check
+  # are injected).
+  add_executable(test_apply_cmd test_apply_cmd.cpp)
+  set_target_properties(test_apply_cmd PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON)
+  target_link_libraries(test_apply_cmd PRIVATE membrane_apply_cmd
+    membrane_runtime_adapters membrane_product_cli membrane_cpp_httplib)
+  target_include_directories(test_apply_cmd PRIVATE
+    ${CMAKE_SOURCE_DIR}/tests/unit
+    ${CMAKE_SOURCE_DIR}/tools/membrane-run
+    ${MEMBRANE_NLOHMANN_JSON_INCLUDE_DIR}
+    ${CMAKE_SOURCE_DIR}/third_party/llama.cpp/ggml/include)
+  add_test(NAME test_apply_cmd COMMAND test_apply_cmd)
+
+  # Post-v1 product-polish, prompt 3: pure, no-network unit tests for
+  # the SSE incremental parser `membrane chat` uses.
+  add_executable(test_chat_stream_parser test_chat_stream_parser.cpp)
+  set_target_properties(test_chat_stream_parser PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON)
+  target_link_libraries(test_chat_stream_parser PRIVATE
+    membrane_chat_stream_parser)
+  target_include_directories(test_chat_stream_parser PRIVATE
+    ${CMAKE_SOURCE_DIR}/tests/unit)
+  add_test(NAME test_chat_stream_parser COMMAND test_chat_stream_parser)
+
+  # Post-v1 product-polish, prompt 3: `membrane chat` -- argument
+  # parsing and slash commands need no network at all; the HTTP-round-
+  # trip cases run against a real, local httplib::Server test fixture
+  # (test_chat_cmd.cpp's own top comment) that scripts exactly the
+  # responses a real MEMBRANE server would send -- never a real model,
+  # never a real MEMBRANE server process. Needs model_cmd.cpp compiled
+  # directly in, and therefore llama/gpu_device/runtime_session/etc.,
+  # for the exact same reason test_use_cmd above does (chat_cmd.cpp
+  # calls membrane_use_cmd_dispatch(), which calls membrane_model_cmd_
+  # dispatch() -- Section 2 of the task: reuse `membrane use`, never a
+  # second model-lifecycle implementation, and this is the honest link-
+  # time cost of that reuse).
+  add_executable(test_chat_cmd test_chat_cmd.cpp model_cmd.cpp)
+  set_target_properties(test_chat_cmd PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON)
+  target_link_libraries(test_chat_cmd PRIVATE membrane_chat_cmd
+    membrane_use_cmd membrane_server membrane_registry_core
+    membrane_server_config membrane_product_cli membrane_gpu_device
+    membrane_runtime_core membrane_runtime_session membrane_model_catalog
+    membrane_download_manager membrane_variant_selector
+    membrane_status_client membrane_doctor_cmd membrane_cli_shared llama)
+  target_include_directories(test_chat_cmd PRIVATE
+    ${CMAKE_SOURCE_DIR}/tests/unit
+    ${CMAKE_SOURCE_DIR}/tools/membrane-run
+    ${CMAKE_SOURCE_DIR}/tools/membrane-llama-runtime
+    ${MEMBRANE_NLOHMANN_JSON_INCLUDE_DIR}
+    ${CMAKE_SOURCE_DIR}/third_party/llama.cpp/ggml/include)
+  add_test(NAME test_chat_cmd COMMAND test_chat_cmd)
+
   # Mega Phase B, PR B1, Section 13: pure tests for the new service-
   # lifecycle modules -- unit generation/path handling, config
   # serialization, atomic write, and subprocess injection safety. None of
   # these touch a real systemd/journalctl (that is the real local smoke
   # test's job, run manually -- see docs/service.md), so they are CI-safe
   # and hermetic like every other test in this file.
+  # Post-v1 product-polish, PR 1: pure/hermetic tests for the shared
+  # service-lifecycle probe (service_state.h) and the `membrane service
+  # start` not-installed guard built on top of it -- see both test
+  # files' own top comments for the real v1.0.0 user-session bug this
+  # closes. Driven entirely through MEMBRANE_SERVICE_PROBE_OVERRIDE, so
+  # neither test ever touches a real systemctl/launchctl/schtasks call.
+  add_executable(test_service_state test_service_state.cpp)
+  set_target_properties(test_service_state PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON)
+  target_link_libraries(test_service_state PRIVATE membrane_service_state)
+  target_include_directories(test_service_state PRIVATE
+    ${CMAKE_SOURCE_DIR}/tests/unit)
+  add_test(NAME test_service_state COMMAND test_service_state)
+
+  add_executable(test_service_cmd test_service_cmd.cpp)
+  set_target_properties(test_service_cmd PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON)
+  target_link_libraries(test_service_cmd PRIVATE membrane_service_cmd
+    membrane_product_cli)
+  target_include_directories(test_service_cmd PRIVATE
+    ${CMAKE_SOURCE_DIR}/tests/unit
+    ${CMAKE_SOURCE_DIR}/tools/membrane-run)
+  add_test(NAME test_service_cmd COMMAND test_service_cmd)
+
+  # Post-v1 product-polish: pure unit tests for the shared chat-
+  # completion finish_reason decision -- no llama/httplib needed at all.
+  add_executable(test_chat_finish_reason test_chat_finish_reason.cpp)
+  set_target_properties(test_chat_finish_reason PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON)
+  target_link_libraries(test_chat_finish_reason PRIVATE
+    membrane_chat_finish_reason)
+  target_include_directories(test_chat_finish_reason PRIVATE
+    ${CMAKE_SOURCE_DIR}/tests/unit)
+  add_test(NAME test_chat_finish_reason COMMAND test_chat_finish_reason)
+
   add_executable(test_systemd_unit test_systemd_unit.cpp)
   set_target_properties(test_systemd_unit PROPERTIES
     CXX_STANDARD 17

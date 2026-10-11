@@ -331,6 +331,115 @@ target_link_libraries(membrane_context_auto_cli PUBLIC
 target_include_directories(membrane_context_auto_cli PUBLIC
   tools/membrane-run)
 
+# Milestone G1 (Planner v2 foundation): the common, product-facing plan
+# representation -- a pure ADAPTER over the existing, unchanged
+# membrane_ctxrec_result_t/membrane_joint_plan_result_t (never a second
+# planner, see membrane_plan.h's own top comment). llama-free, no model/
+# device/host access, same testable-without-a-model/GPU pattern as
+# membrane_context_recommender above.
+add_library(membrane_plan STATIC
+  tools/membrane-run/membrane_plan.c)
+target_link_libraries(membrane_plan PUBLIC
+  membrane_context_recommender membrane_gpu_policy membrane_sanitizers)
+target_include_directories(membrane_plan PUBLIC tools/membrane-run)
+
+# Milestone G2 (Planner v2 joint variant/quant optimizer): the one
+# orchestration layer G1 deliberately left out -- runs membrane_plan's
+# own existing ctxrec/joint pipeline once per candidate model variant/
+# quant and selects among the results by a small, fixed, documented
+# policy (see plan_v2_resolver.h's own top comment). Never a second
+# planner, never reimplements membrane_plan/membrane_context_recommender/
+# membrane_joint_planner's own arithmetic -- llama-free, no model/
+# device/host access, same testable-without-a-model/GPU pattern as
+# every module above.
+add_library(membrane_plan_v2_resolver STATIC
+  tools/membrane-run/plan_v2_resolver.c)
+target_link_libraries(membrane_plan_v2_resolver PUBLIC
+  membrane_plan membrane_sanitizers)
+target_include_directories(membrane_plan_v2_resolver PUBLIC
+  tools/membrane-run)
+
+# Milestone H1 (runtime abstraction foundation): runtime identity +
+# capability model + read-only plan/capability negotiation (see
+# runtime_capabilities.h's own top comment). Only depends on membrane_
+# plan for membrane_plan_t's own type definition (header-only -- this
+# module never calls membrane_plan_assemble() or any planner function,
+# so it does not need to link membrane_plan/membrane_context_
+# recommender/membrane_gpu_policy at all), llama-free, no model/device/
+# service access, same testable-without-a-model/GPU pattern as every
+# module above.
+add_library(membrane_runtime_capabilities STATIC
+  tools/membrane-run/runtime_capabilities.c)
+target_link_libraries(membrane_runtime_capabilities PUBLIC
+  membrane_sanitizers)
+target_include_directories(membrane_runtime_capabilities PUBLIC
+  tools/membrane-run)
+
+# Milestone I1 (observation foundation): the backend-neutral, point-in-
+# time observation snapshot + provenance model (observation.h's own top
+# comment). Pure/llama-free, no I/O -- the native provider that probes
+# the host is tools/membrane/observe_cmd.cpp.
+add_library(membrane_observation STATIC
+  tools/membrane-run/observation.c)
+target_link_libraries(membrane_observation PUBLIC membrane_sanitizers)
+target_include_directories(membrane_observation PUBLIC tools/membrane-run)
+
+# Milestone I3 (memory intelligence): the last of Milestone I's three
+# layers -- reads an already-built membrane_observation_snapshot_t
+# (membrane_observation above) and an already-described membrane_
+# runtime_capabilities_t (membrane_runtime_capabilities above) and
+# produces findings[]/recommendations[] (memory_intelligence.h's own top
+# comment). Pure/llama-free, no I/O, no second planner, no capability
+# negotiation of its own -- same testable-without-a-host pattern as
+# every module above.
+add_library(membrane_memory_intelligence STATIC
+  tools/membrane-run/memory_intelligence.c)
+target_link_libraries(membrane_memory_intelligence PUBLIC
+  membrane_observation membrane_runtime_capabilities membrane_sanitizers)
+target_include_directories(membrane_memory_intelligence PUBLIC
+  tools/membrane-run)
+
+# Milestone J (active control): the common action model, the pure
+# recommendation-to-action compiler, stale-plan check and the
+# transaction/rollback engine behind `membrane apply` (action.h's own top
+# comment). Pure/llama-free; the engine only talks to caller-supplied
+# executor callbacks, so it is tested with a mock runtime.
+add_library(membrane_action STATIC tools/membrane-run/action.c)
+target_link_libraries(membrane_action PUBLIC
+  membrane_memory_intelligence membrane_runtime_capabilities
+  membrane_sanitizers)
+target_include_directories(membrane_action PUBLIC tools/membrane-run)
+
+# Milestone K (adaptive runtime): the pure policy / bounded-history /
+# hysteresis / cooldown / anti-thrashing / decision layer (adaptive.h's own
+# top comment). No clock, no I/O, no threads: every function takes now_ms.
+add_library(membrane_adaptive STATIC tools/membrane-run/adaptive.c)
+target_link_libraries(membrane_adaptive PUBLIC membrane_action
+  membrane_memory_intelligence membrane_observation membrane_sanitizers)
+target_include_directories(membrane_adaptive PUBLIC tools/membrane-run)
+
+# Milestone L: runtime orchestration -- the pure, deterministic "which
+# runtime should serve this model, and why" decision (orchestrator.h's own
+# top comment). Llama-free, no I/O.
+add_library(membrane_orchestrator STATIC tools/membrane-run/orchestrator.c)
+target_link_libraries(membrane_orchestrator PUBLIC
+  membrane_runtime_capabilities membrane_sanitizers)
+target_include_directories(membrane_orchestrator PUBLIC tools/membrane-run)
+
+# Milestone H3 (runtime-aware plan assessment): classifies -- never
+# applies -- a Planner v2 plan or an explicit request against one
+# runtime's capability matrix (runtime_plan_assessment.h's own top
+# comment). Pure/llama-free; reads membrane_plan_t only as a type, like
+# membrane_runtime_capabilities above. kv_residency_policy only for its
+# existing placement-mode display name.
+add_library(membrane_runtime_plan_assessment STATIC
+  tools/membrane-run/runtime_plan_assessment.c)
+target_link_libraries(membrane_runtime_plan_assessment PUBLIC
+  membrane_runtime_capabilities membrane_kv_residency_policy
+  membrane_sanitizers)
+target_include_directories(membrane_runtime_plan_assessment PUBLIC
+  tools/membrane-run)
+
 # Phase 21: the bounded apply-time fallback CONTROLLER -- llama-free,
 # same pattern as membrane_joint_planner above. Consumes (never
 # duplicates or regenerates) the ranked candidate array
@@ -895,6 +1004,82 @@ if(MEMBRANE_BUILD_TESTS)
   target_include_directories(test_context_auto_cli PRIVATE
     ${CMAKE_SOURCE_DIR}/tests/unit)
   add_test(NAME test_context_auto_cli COMMAND test_context_auto_cli)
+
+  # Milestone G1: the common plan representation's own tests -- llama-
+  # free, synthetic model/device facts only, same pattern as
+  # test_context_recommender above.
+  add_executable(test_membrane_plan
+    tools/membrane-run/test_membrane_plan.c)
+  target_link_libraries(test_membrane_plan PRIVATE membrane_plan)
+  target_include_directories(test_membrane_plan PRIVATE
+    ${CMAKE_SOURCE_DIR}/tests/unit)
+  add_test(NAME test_membrane_plan COMMAND test_membrane_plan)
+
+  # Milestone G2: the joint variant/quant resolver's own tests --
+  # llama-free, synthetic multi-variant model/device facts only, same
+  # pattern as test_membrane_plan above.
+  add_executable(test_plan_v2_resolver
+    tools/membrane-run/test_plan_v2_resolver.c)
+  target_link_libraries(test_plan_v2_resolver PRIVATE
+    membrane_plan_v2_resolver)
+  target_include_directories(test_plan_v2_resolver PRIVATE
+    ${CMAKE_SOURCE_DIR}/tests/unit)
+  add_test(NAME test_plan_v2_resolver COMMAND test_plan_v2_resolver)
+
+  # Milestone H1: the runtime identity/capability/negotiation module's
+  # own tests -- llama-free, synthetic capability/plan fixtures only,
+  # same pattern as test_membrane_plan/test_plan_v2_resolver above.
+  add_executable(test_runtime_capabilities
+    tools/membrane-run/test_runtime_capabilities.c)
+  target_link_libraries(test_runtime_capabilities PRIVATE
+    membrane_runtime_capabilities)
+  target_include_directories(test_runtime_capabilities PRIVATE
+    ${CMAKE_SOURCE_DIR}/tests/unit)
+  add_test(NAME test_runtime_capabilities COMMAND test_runtime_capabilities)
+
+  # Milestone I1: the observation model's own tests -- llama-free,
+  # synthetic values only, same pattern as test_runtime_capabilities.
+  add_executable(test_observation
+    tools/membrane-run/test_observation.c)
+  target_link_libraries(test_observation PRIVATE membrane_observation)
+  target_include_directories(test_observation PRIVATE
+    ${CMAKE_SOURCE_DIR}/tests/unit)
+  add_test(NAME test_observation COMMAND test_observation)
+
+  # Milestone I3: the memory-intelligence assembler's own tests --
+  # llama-free, synthetic snapshot/capability fixtures only, same pattern
+  # as test_observation/test_runtime_capabilities above.
+  add_executable(test_memory_intelligence
+    tools/membrane-run/test_memory_intelligence.c)
+  target_link_libraries(test_memory_intelligence PRIVATE
+    membrane_memory_intelligence)
+  target_include_directories(test_memory_intelligence PRIVATE
+    ${CMAKE_SOURCE_DIR}/tests/unit)
+  add_test(NAME test_memory_intelligence COMMAND test_memory_intelligence)
+
+  # Milestone J: the action model / compiler / transaction engine tests --
+  # llama-free, mock executor only.
+  add_executable(test_action tools/membrane-run/test_action.c)
+  target_link_libraries(test_action PRIVATE membrane_action)
+  target_include_directories(test_action PRIVATE
+    ${CMAKE_SOURCE_DIR}/tests/unit)
+  add_test(NAME test_action COMMAND test_action)
+
+  # Milestone K: adaptive policy/history/decision tests -- synthetic
+  # timelines with injected timestamps, no sleeps, no host.
+  add_executable(test_adaptive tools/membrane-run/test_adaptive.c)
+  target_link_libraries(test_adaptive PRIVATE membrane_adaptive)
+  target_include_directories(test_adaptive PRIVATE
+    ${CMAKE_SOURCE_DIR}/tests/unit)
+  add_test(NAME test_adaptive COMMAND test_adaptive)
+
+  # Milestone L: orchestration decision tests -- synthetic runtime x
+  # hardware matrices, no host, no network.
+  add_executable(test_orchestrator tools/membrane-run/test_orchestrator.c)
+  target_link_libraries(test_orchestrator PRIVATE membrane_orchestrator)
+  target_include_directories(test_orchestrator PRIVATE
+    ${CMAKE_SOURCE_DIR}/tests/unit)
+  add_test(NAME test_orchestrator COMMAND test_orchestrator)
 
   # Phase 21: the bounded apply-time fallback controller's own tests --
   # llama-free (synthetic apply_fn/refresh_fn test doubles), plus a
